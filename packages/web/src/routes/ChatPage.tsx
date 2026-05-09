@@ -7,8 +7,14 @@ import { ConversationItem } from '@/components/conversations/ConversationItem';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import { useProject } from '@/contexts/ProjectContext';
-import { listConversations, listWorkflowRuns, addCodebase, getCodebaseInput } from '@/lib/api';
-import type { CodebaseResponse } from '@/lib/api';
+import {
+  listConversations,
+  listWorkflowRuns,
+  runWorkflow,
+  addCodebase,
+  getCodebaseInput,
+} from '@/lib/api';
+import type { CodebaseResponse, ConversationResponse, WorkflowRunResponse } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 const PANEL_MIN = 220;
@@ -43,6 +49,8 @@ export function ChatPage(): React.ReactElement {
   const [addValue, setAddValue] = useState('');
   const [addLoading, setAddLoading] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
+  const [rerunningWorkflowRunId, setRerunningWorkflowRunId] = useState<string | null>(null);
+  const [rerunError, setRerunError] = useState<string | null>(null);
   const addInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -99,21 +107,45 @@ export function ChatPage(): React.ReactElement {
     refetchInterval: 10_000,
   });
 
-  const conversationStatusMap = useMemo((): Map<string, 'running' | 'failed'> => {
-    const map = new Map<string, 'running' | 'failed'>();
+  const latestWorkflowRunMap = useMemo((): Map<string, WorkflowRunResponse> => {
+    const map = new Map<string, WorkflowRunResponse>();
     if (!runs) return map;
-    for (const run of runs) {
+
+    const sortedRuns = [...runs].sort((a, b) => {
+      const aTime = new Date(a.started_at.endsWith('Z') ? a.started_at : `${a.started_at}Z`);
+      const bTime = new Date(b.started_at.endsWith('Z') ? b.started_at : `${b.started_at}Z`);
+      return bTime.getTime() - aTime.getTime();
+    });
+
+    for (const run of sortedRuns) {
       // For web runs, parent_conversation_id is the visible conversation in the sidebar.
       // For CLI runs, conversation_id is the only conversation (no parent/worker split).
       const key = run.parent_conversation_id ?? run.conversation_id;
+      if (!map.has(key)) map.set(key, run);
+    }
+    return map;
+  }, [runs]);
+
+  const conversationStatusMap = useMemo((): Map<string, 'running' | 'failed'> => {
+    const map = new Map<string, 'running' | 'failed'>();
+    for (const [key, run] of latestWorkflowRunMap) {
       if (run.status === 'running') {
         map.set(key, 'running');
-      } else if (run.status === 'failed' && !map.has(key)) {
+      } else if (run.status === 'failed') {
         map.set(key, 'failed');
       }
     }
     return map;
-  }, [runs]);
+  }, [latestWorkflowRunMap]);
+
+  const failedWorkflowRunMap = useMemo((): Map<string, WorkflowRunResponse> => {
+    const map = new Map<string, WorkflowRunResponse>();
+    for (const [key, run] of latestWorkflowRunMap) {
+      if (run.status !== 'failed') continue;
+      map.set(key, run);
+    }
+    return map;
+  }, [latestWorkflowRunMap]);
 
   const codebaseMap = useMemo((): Map<string, CodebaseResponse> => {
     const map = new Map<string, CodebaseResponse>();
@@ -138,6 +170,32 @@ export function ChatPage(): React.ReactElement {
   const handleNewChat = useCallback((): void => {
     navigate('/chat');
   }, [navigate]);
+
+  const handleRerunWorkflow = useCallback(
+    (
+      run: { id: string; workflowName: string; userMessage: string },
+      conversation: ConversationResponse
+    ): void => {
+      if (rerunningWorkflowRunId) return;
+
+      setRerunningWorkflowRunId(run.id);
+      setRerunError(null);
+
+      void runWorkflow(run.workflowName, conversation.platform_conversation_id, run.userMessage)
+        .then(() => {
+          void queryClient.invalidateQueries({ queryKey: ['workflow-runs-status'] });
+          void queryClient.invalidateQueries({ queryKey: ['conversations'] });
+          navigate(`/chat/${encodeURIComponent(conversation.platform_conversation_id)}`);
+        })
+        .catch((err: unknown) => {
+          setRerunError(err instanceof Error ? err.message : 'Failed to rerun workflow');
+        })
+        .finally(() => {
+          setRerunningWorkflowRunId(null);
+        });
+    },
+    [navigate, queryClient, rerunningWorkflowRunId]
+  );
 
   const handleAddSubmit = useCallback((): void => {
     const trimmed = addValue.trim();
@@ -263,6 +321,12 @@ export function ChatPage(): React.ReactElement {
 
         <Separator className="bg-border" />
 
+        {rerunError && (
+          <div className="mx-3 mt-2 rounded-md border border-error/30 bg-error/10 px-2 py-1.5 text-[11px] text-error">
+            {rerunError}
+          </div>
+        )}
+
         {/* Search */}
         <div className="px-3 py-2">
           <div className="relative">
@@ -283,16 +347,30 @@ export function ChatPage(): React.ReactElement {
         <ScrollArea className="flex-1 min-h-0 px-2 pb-2">
           <div className="flex flex-col gap-0.5">
             {filtered && filtered.length > 0 ? (
-              filtered.map(conv => (
-                <ConversationItem
-                  key={conv.id}
-                  conversation={conv}
-                  projectName={
-                    conv.codebase_id ? codebaseMap.get(conv.codebase_id)?.name : undefined
-                  }
-                  status={conversationStatusMap.get(conv.id) ?? 'idle'}
-                />
-              ))
+              filtered.map(conv => {
+                const failedRun = failedWorkflowRunMap.get(conv.id);
+                return (
+                  <ConversationItem
+                    key={conv.id}
+                    conversation={conv}
+                    projectName={
+                      conv.codebase_id ? codebaseMap.get(conv.codebase_id)?.name : undefined
+                    }
+                    status={conversationStatusMap.get(conv.id) ?? 'idle'}
+                    failedWorkflowRun={
+                      failedRun
+                        ? {
+                            id: failedRun.id,
+                            workflowName: failedRun.workflow_name,
+                            userMessage: failedRun.user_message,
+                          }
+                        : undefined
+                    }
+                    rerunningWorkflowRunId={rerunningWorkflowRunId}
+                    onRerunWorkflow={handleRerunWorkflow}
+                  />
+                );
+              })
             ) : (
               <div className="flex flex-col items-center justify-center gap-2 py-8 px-4">
                 <FolderGit2 className="h-8 w-8 text-text-tertiary" />

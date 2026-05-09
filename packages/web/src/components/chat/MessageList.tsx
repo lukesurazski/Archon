@@ -129,15 +129,17 @@ function WorkflowResultCard({
   });
 
   // Merge: prefer live state when available
-  const status = liveState?.status ?? runData?.run.status ?? 'completed';
+  const restRun = runData?.run;
+  const restEvents = runData?.events ?? [];
+  const status = liveState?.status ?? restRun?.status ?? 'completed';
   const dagNodes = liveState?.dagNodes ?? [];
   const storeArtifacts = liveState?.artifacts ?? [];
   const startedAt =
     liveState?.startedAt ??
-    (runData?.run.started_at ? new Date(ensureUtc(runData.run.started_at)).getTime() : null);
+    (restRun?.started_at ? new Date(ensureUtc(restRun.started_at)).getTime() : null);
   const completedAt =
     liveState?.completedAt ??
-    (runData?.run.completed_at ? new Date(ensureUtc(runData.run.completed_at)).getTime() : null);
+    (restRun?.completed_at ? new Date(ensureUtc(restRun.completed_at)).getTime() : null);
   const duration = startedAt != null && completedAt != null ? completedAt - startedAt : null;
 
   // Node counts: prefer live dagNodes (exact), fall back to events (approximation —
@@ -151,7 +153,7 @@ function WorkflowResultCard({
       n => n.status === 'completed' || n.status === 'failed' || n.status === 'skipped'
     ).length;
   } else {
-    const events = runData?.events ?? [];
+    const events = restEvents;
     const terminalEvents = events.filter(
       e =>
         e.event_type === 'node_completed' ||
@@ -163,7 +165,7 @@ function WorkflowResultCard({
   }
 
   // Artifacts: prefer live store, fall back to events
-  const eventArtifacts: WorkflowArtifact[] = (runData?.events ?? [])
+  const eventArtifacts: WorkflowArtifact[] = restEvents
     .filter(e => e.event_type === 'workflow_artifact')
     .map(e => {
       const d = e.data;
@@ -179,7 +181,7 @@ function WorkflowResultCard({
   const artifacts = storeArtifacts.length > 0 ? storeArtifacts : eventArtifacts;
 
   // If API fetch failed and no live state, show degraded card with just content + link
-  const fetchFailed = isError && !liveState;
+  const fetchFailed = (isError || (!liveState && runData !== undefined && !restRun)) && !liveState;
 
   // Status-aware header title
   let headerTitle: string;

@@ -52,7 +52,7 @@ export function resolveNodeDisplay(dn: DagNode): {
   contentPreview?: string;
 } {
   if ('bash' in dn && dn.bash) {
-    const preview = firstMeaningfulLine(dn.bash);
+    const preview = firstMeaningfulLine(dn.bash, { skipHashComments: true });
     return {
       label: meaningfulNodeLabel(dn.id, preview, 'Shell'),
       nodeType: 'bash',
@@ -64,7 +64,7 @@ export function resolveNodeDisplay(dn: DagNode): {
   if ('command' in dn && dn.command) {
     return { label: dn.command, nodeType: 'command', contentPreview: humanizeNodeId(dn.id) };
   }
-  const preview = firstMeaningfulLine(dn.prompt ?? '');
+  const preview = firstMeaningfulLine(dn.prompt ?? '', { skipHashComments: false });
   return {
     label: meaningfulNodeLabel(dn.id, preview, 'Prompt'),
     nodeType: 'prompt',
@@ -91,12 +91,15 @@ function isGenericNodeId(id: string): boolean {
   return /^(node|step|bash|shell|prompt)(?:[-_\s]?\d+)?$/i.test(id.trim());
 }
 
-function firstMeaningfulLine(value: string): string {
+function firstMeaningfulLine(
+  value: string,
+  options: { skipHashComments: boolean } = { skipHashComments: true }
+): string {
   const line =
     value
       .split('\n')
       .map(part => part.trim())
-      .find(part => part.length > 0 && !part.startsWith('#')) ?? '';
+      .find(part => part.length > 0 && (!options.skipHashComments || !part.startsWith('#'))) ?? '';
   return line.replace(/\s+/g, ' ');
 }
 

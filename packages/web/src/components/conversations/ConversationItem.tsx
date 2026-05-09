@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from 'react';
 import { NavLink, useNavigate, useParams } from 'react-router';
-import { Pencil, Trash2 } from 'lucide-react';
+import { Loader2, Pencil, RotateCcw, Trash2 } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { ConversationResponse } from '@/lib/api';
 import { deleteConversation, updateConversation } from '@/lib/api';
@@ -21,6 +21,16 @@ interface ConversationItemProps {
   badge?: number;
   projectName?: string;
   status?: 'idle' | 'running' | 'failed';
+  failedWorkflowRun?: {
+    id: string;
+    workflowName: string;
+    userMessage: string;
+  };
+  rerunningWorkflowRunId?: string | null;
+  onRerunWorkflow?: (
+    run: { id: string; workflowName: string; userMessage: string },
+    conversation: ConversationResponse
+  ) => void;
 }
 
 export function ConversationItem({
@@ -28,6 +38,9 @@ export function ConversationItem({
   badge,
   projectName,
   status = 'idle',
+  failedWorkflowRun,
+  rerunningWorkflowRunId,
+  onRerunWorkflow,
 }: ConversationItemProps): React.ReactElement {
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState('');
@@ -38,6 +51,7 @@ export function ConversationItem({
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const params = useParams<{ conversationId: string }>();
+  const isRerunning = failedWorkflowRun?.id === rerunningWorkflowRunId;
 
   const displayName = conversation.title
     ? conversation.title.length > 30
@@ -165,6 +179,24 @@ export function ConversationItem({
       {!isEditing && (
         <>
           <div className="absolute right-2 top-2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity duration-150 z-10">
+            {failedWorkflowRun && onRerunWorkflow && (
+              <button
+                onClick={(e): void => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onRerunWorkflow(failedWorkflowRun, conversation);
+                }}
+                disabled={isRerunning}
+                className="p-1 rounded hover:bg-surface-elevated disabled:cursor-wait disabled:opacity-60"
+                title={`Rerun failed workflow: ${failedWorkflowRun.workflowName}`}
+              >
+                {isRerunning ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                ) : (
+                  <RotateCcw className="h-3.5 w-3.5 text-text-tertiary hover:text-primary" />
+                )}
+              </button>
+            )}
             <button
               onClick={(e): void => {
                 e.preventDefault();
