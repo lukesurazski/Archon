@@ -126,18 +126,6 @@ export function ChatPage(): React.ReactElement {
     return map;
   }, [runs]);
 
-  const conversationStatusMap = useMemo((): Map<string, 'running' | 'failed'> => {
-    const map = new Map<string, 'running' | 'failed'>();
-    for (const [key, run] of latestWorkflowRunMap) {
-      if (run.status === 'running') {
-        map.set(key, 'running');
-      } else if (run.status === 'failed') {
-        map.set(key, 'failed');
-      }
-    }
-    return map;
-  }, [latestWorkflowRunMap]);
-
   const failedWorkflowRunMap = useMemo((): Map<string, WorkflowRunResponse> => {
     const map = new Map<string, WorkflowRunResponse>();
     for (const [key, run] of latestWorkflowRunMap) {
@@ -348,6 +336,7 @@ export function ChatPage(): React.ReactElement {
           <div className="flex flex-col gap-0.5">
             {filtered && filtered.length > 0 ? (
               filtered.map(conv => {
+                const latestRun = latestWorkflowRunMap.get(conv.id);
                 const failedRun = failedWorkflowRunMap.get(conv.id);
                 return (
                   <ConversationItem
@@ -356,7 +345,16 @@ export function ChatPage(): React.ReactElement {
                     projectName={
                       conv.codebase_id ? codebaseMap.get(conv.codebase_id)?.name : undefined
                     }
-                    status={conversationStatusMap.get(conv.id) ?? 'idle'}
+                    status={latestRun?.status ?? 'idle'}
+                    workflowRun={
+                      latestRun
+                        ? {
+                            id: latestRun.id,
+                            workflowName: latestRun.workflow_name,
+                            status: latestRun.status,
+                          }
+                        : undefined
+                    }
                     failedWorkflowRun={
                       failedRun
                         ? {

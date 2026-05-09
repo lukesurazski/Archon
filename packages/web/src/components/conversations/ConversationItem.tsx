@@ -1,8 +1,9 @@
 import { useState, useRef, useCallback } from 'react';
 import { NavLink, useNavigate, useParams } from 'react-router';
-import { Loader2, Pencil, RotateCcw, Trash2 } from 'lucide-react';
+import { ArrowRight, Loader2, Pencil, RotateCcw, Trash2 } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { ConversationResponse } from '@/lib/api';
+import type { WorkflowRunStatus } from '@/lib/types';
 import { deleteConversation, updateConversation } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import {
@@ -20,7 +21,12 @@ interface ConversationItemProps {
   conversation: ConversationResponse;
   badge?: number;
   projectName?: string;
-  status?: 'idle' | 'running' | 'failed';
+  status?: 'idle' | WorkflowRunStatus;
+  workflowRun?: {
+    id: string;
+    workflowName: string;
+    status: WorkflowRunStatus;
+  };
   failedWorkflowRun?: {
     id: string;
     workflowName: string;
@@ -38,6 +44,7 @@ export function ConversationItem({
   badge,
   projectName,
   status = 'idle',
+  workflowRun,
   failedWorkflowRun,
   rerunningWorkflowRunId,
   onRerunWorkflow,
@@ -52,6 +59,7 @@ export function ConversationItem({
   const navigate = useNavigate();
   const params = useParams<{ conversationId: string }>();
   const isRerunning = failedWorkflowRun?.id === rerunningWorkflowRunId;
+  const effectiveStatus = workflowRun?.status ?? status;
 
   const displayName = conversation.title
     ? conversation.title.length > 30
@@ -121,6 +129,33 @@ export function ConversationItem({
     [handleRenameSubmit]
   );
 
+  const handleViewWorkflowRun = useCallback(
+    (e: React.MouseEvent): void => {
+      if (!workflowRun) return;
+      e.preventDefault();
+      e.stopPropagation();
+      void navigate(`/workflows/runs/${workflowRun.id}`);
+    },
+    [navigate, workflowRun]
+  );
+
+  const getStatusLabel = (runStatus: WorkflowRunStatus): string => {
+    switch (runStatus) {
+      case 'running':
+        return 'Running';
+      case 'completed':
+        return 'Completed';
+      case 'failed':
+        return 'Failed';
+      case 'cancelled':
+        return 'Cancelled';
+      case 'paused':
+        return 'Paused';
+      case 'pending':
+        return 'Pending';
+    }
+  };
+
   return (
     <NavLink
       to={`/chat/${encodeURIComponent(conversation.platform_conversation_id)}`}
@@ -134,9 +169,11 @@ export function ConversationItem({
       <div
         className={cn(
           'h-2 w-2 shrink-0 rounded-full',
-          status === 'running' && 'bg-primary animate-pulse',
-          status === 'failed' && 'bg-destructive',
-          status === 'idle' && 'bg-text-tertiary'
+          effectiveStatus === 'running' && 'bg-primary animate-pulse',
+          effectiveStatus === 'completed' && 'bg-success',
+          effectiveStatus === 'failed' && 'bg-destructive',
+          (effectiveStatus === 'pending' || effectiveStatus === 'paused') && 'bg-warning',
+          (effectiveStatus === 'idle' || effectiveStatus === 'cancelled') && 'bg-text-tertiary'
         )}
       />
       <div className="flex min-w-0 flex-1 flex-col">
@@ -168,17 +205,55 @@ export function ConversationItem({
                 {conversation.platform_type}
               </span>
             )}
+            {effectiveStatus !== 'idle' && (
+              <span
+                className={cn(
+                  'shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide',
+                  effectiveStatus === 'running' && 'bg-primary/15 text-primary',
+                  effectiveStatus === 'completed' && 'bg-success/15 text-success',
+                  effectiveStatus === 'failed' && 'bg-destructive/15 text-destructive',
+                  (effectiveStatus === 'pending' || effectiveStatus === 'paused') &&
+                    'bg-warning/15 text-warning',
+                  effectiveStatus === 'cancelled' && 'bg-surface-secondary text-text-tertiary'
+                )}
+                title={`Latest workflow run is ${getStatusLabel(effectiveStatus).toLowerCase()}`}
+              >
+                {getStatusLabel(effectiveStatus)}
+              </span>
+            )}
           </div>
         )}
         {renameError && <span className="text-[10px] text-error">{renameError}</span>}
         <span className="truncate text-[11px] text-text-tertiary">{lastActivity}</span>
-        {projectName && (
-          <span className="truncate text-[10px] text-text-tertiary">{projectName}</span>
+        {(projectName || workflowRun) && (
+          <div className="flex min-w-0 items-center gap-1.5">
+            {projectName && (
+              <span className="truncate text-[10px] text-text-tertiary">{projectName}</span>
+            )}
+            {workflowRun && (
+              <button
+                onClick={handleViewWorkflowRun}
+                className="shrink-0 rounded px-1 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/10"
+                title={`Open workflow run graph: ${workflowRun.workflowName}`}
+              >
+                Graph
+              </button>
+            )}
+          </div>
         )}
       </div>
       {!isEditing && (
         <>
           <div className="absolute right-2 top-2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity duration-150 z-10">
+            {workflowRun && (
+              <button
+                onClick={handleViewWorkflowRun}
+                className="p-1 rounded hover:bg-surface-elevated"
+                title={`View workflow run graph: ${workflowRun.workflowName}`}
+              >
+                <ArrowRight className="h-3.5 w-3.5 text-text-tertiary hover:text-primary" />
+              </button>
+            )}
             {failedWorkflowRun && onRerunWorkflow && (
               <button
                 onClick={(e): void => {
