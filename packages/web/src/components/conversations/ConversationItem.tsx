@@ -27,10 +27,11 @@ interface ConversationItemProps {
     workflowName: string;
     status: WorkflowRunStatus;
     userMessage: string;
+    codebaseId: string | null;
   };
   rerunningWorkflowRunId?: string | null;
   onRerunWorkflow?: (
-    run: { id: string; workflowName: string; userMessage: string },
+    run: { id: string; workflowName: string; userMessage: string; codebaseId: string | null },
     conversation: ConversationResponse
   ) => void;
 }

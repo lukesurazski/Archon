@@ -8,6 +8,8 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import { useProject } from '@/contexts/ProjectContext';
 import {
+  createConversation,
+  deleteConversation,
   listConversations,
   listWorkflowRuns,
   runWorkflow,
@@ -152,22 +154,40 @@ export function ChatPage(): React.ReactElement {
 
   const handleRerunWorkflow = useCallback(
     (
-      run: { id: string; workflowName: string; userMessage: string },
-      conversation: ConversationResponse
+      run: { id: string; workflowName: string; userMessage: string; codebaseId: string | null },
+      _conversation: ConversationResponse
     ): void => {
       if (rerunningWorkflowRunId) return;
 
       setRerunningWorkflowRunId(run.id);
       setRerunError(null);
 
-      void runWorkflow(run.workflowName, conversation.platform_conversation_id, run.userMessage)
+      let newConversationId: string | undefined;
+      let workflowStarted = false;
+
+      void createConversation(run.codebaseId ?? undefined)
+        .then(({ conversationId }) => {
+          newConversationId = conversationId;
+          return runWorkflow(run.workflowName, conversationId, run.userMessage);
+        })
         .then(() => {
+          workflowStarted = true;
           void queryClient.invalidateQueries({ queryKey: ['workflow-runs-status'] });
           void queryClient.invalidateQueries({ queryKey: ['conversations'] });
-          navigate(`/chat/${encodeURIComponent(conversation.platform_conversation_id)}`);
+          if (newConversationId) {
+            navigate(`/chat/${encodeURIComponent(newConversationId)}`);
+          }
         })
         .catch((err: unknown) => {
           setRerunError(err instanceof Error ? err.message : 'Failed to run workflow again');
+          if (newConversationId !== undefined && !workflowStarted) {
+            void deleteConversation(newConversationId).catch((cleanupErr: unknown) => {
+              console.warn('[ChatPage] Failed to clean up failed workflow rerun conversation', {
+                conversationId: newConversationId,
+                error: cleanupErr instanceof Error ? cleanupErr.message : cleanupErr,
+              });
+            });
+          }
         })
         .finally(() => {
           setRerunningWorkflowRunId(null);
@@ -343,6 +363,7 @@ export function ChatPage(): React.ReactElement {
                             workflowName: latestRun.workflow_name,
                             status: latestRun.status,
                             userMessage: latestRun.user_message,
+                            codebaseId: latestRun.codebase_id,
                           }
                         : undefined
                     }
