@@ -26,10 +26,6 @@ interface ConversationItemProps {
     id: string;
     workflowName: string;
     status: WorkflowRunStatus;
-  };
-  failedWorkflowRun?: {
-    id: string;
-    workflowName: string;
     userMessage: string;
   };
   rerunningWorkflowRunId?: string | null;
@@ -45,7 +41,6 @@ export function ConversationItem({
   projectName,
   status = 'idle',
   workflowRun,
-  failedWorkflowRun,
   rerunningWorkflowRunId,
   onRerunWorkflow,
 }: ConversationItemProps): React.ReactElement {
@@ -58,7 +53,7 @@ export function ConversationItem({
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const params = useParams<{ conversationId: string }>();
-  const isRerunning = failedWorkflowRun?.id === rerunningWorkflowRunId;
+  const isRerunning = workflowRun?.id === rerunningWorkflowRunId;
   const effectiveStatus = workflowRun?.status ?? status;
 
   const displayName = conversation.title
@@ -137,6 +132,16 @@ export function ConversationItem({
       void navigate(`/workflows/runs/${workflowRun.id}`);
     },
     [navigate, workflowRun]
+  );
+
+  const handleRunWorkflowAgain = useCallback(
+    (e: React.MouseEvent): void => {
+      if (!workflowRun || !onRerunWorkflow) return;
+      e.preventDefault();
+      e.stopPropagation();
+      onRerunWorkflow(workflowRun, conversation);
+    },
+    [conversation, onRerunWorkflow, workflowRun]
   );
 
   const getStatusLabel = (runStatus: WorkflowRunStatus): string => {
@@ -239,6 +244,16 @@ export function ConversationItem({
                 Graph
               </button>
             )}
+            {workflowRun && onRerunWorkflow && (
+              <button
+                onClick={handleRunWorkflowAgain}
+                disabled={isRerunning}
+                className="shrink-0 rounded px-1 py-0.5 text-[10px] font-medium text-text-secondary hover:bg-surface-elevated hover:text-primary disabled:cursor-wait disabled:opacity-60"
+                title={`Run workflow again: ${workflowRun.workflowName}`}
+              >
+                {isRerunning ? 'Running...' : 'Run again'}
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -254,16 +269,12 @@ export function ConversationItem({
                 <ArrowRight className="h-3.5 w-3.5 text-text-tertiary hover:text-primary" />
               </button>
             )}
-            {failedWorkflowRun && onRerunWorkflow && (
+            {workflowRun && onRerunWorkflow && (
               <button
-                onClick={(e): void => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  onRerunWorkflow(failedWorkflowRun, conversation);
-                }}
+                onClick={handleRunWorkflowAgain}
                 disabled={isRerunning}
                 className="p-1 rounded hover:bg-surface-elevated disabled:cursor-wait disabled:opacity-60"
-                title={`Rerun failed workflow: ${failedWorkflowRun.workflowName}`}
+                title={`Run workflow again: ${workflowRun.workflowName}`}
               >
                 {isRerunning ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />

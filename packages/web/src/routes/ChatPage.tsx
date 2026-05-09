@@ -126,15 +126,6 @@ export function ChatPage(): React.ReactElement {
     return map;
   }, [runs]);
 
-  const failedWorkflowRunMap = useMemo((): Map<string, WorkflowRunResponse> => {
-    const map = new Map<string, WorkflowRunResponse>();
-    for (const [key, run] of latestWorkflowRunMap) {
-      if (run.status !== 'failed') continue;
-      map.set(key, run);
-    }
-    return map;
-  }, [latestWorkflowRunMap]);
-
   const codebaseMap = useMemo((): Map<string, CodebaseResponse> => {
     const map = new Map<string, CodebaseResponse>();
     if (codebases) {
@@ -176,7 +167,7 @@ export function ChatPage(): React.ReactElement {
           navigate(`/chat/${encodeURIComponent(conversation.platform_conversation_id)}`);
         })
         .catch((err: unknown) => {
-          setRerunError(err instanceof Error ? err.message : 'Failed to rerun workflow');
+          setRerunError(err instanceof Error ? err.message : 'Failed to run workflow again');
         })
         .finally(() => {
           setRerunningWorkflowRunId(null);
@@ -337,7 +328,6 @@ export function ChatPage(): React.ReactElement {
             {filtered && filtered.length > 0 ? (
               filtered.map(conv => {
                 const latestRun = latestWorkflowRunMap.get(conv.id);
-                const failedRun = failedWorkflowRunMap.get(conv.id);
                 return (
                   <ConversationItem
                     key={conv.id}
@@ -352,15 +342,7 @@ export function ChatPage(): React.ReactElement {
                             id: latestRun.id,
                             workflowName: latestRun.workflow_name,
                             status: latestRun.status,
-                          }
-                        : undefined
-                    }
-                    failedWorkflowRun={
-                      failedRun
-                        ? {
-                            id: failedRun.id,
-                            workflowName: failedRun.workflow_name,
-                            userMessage: failedRun.user_message,
+                            userMessage: latestRun.user_message,
                           }
                         : undefined
                     }
