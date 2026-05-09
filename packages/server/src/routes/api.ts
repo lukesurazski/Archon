@@ -35,6 +35,7 @@ import {
   getCommandFolderSearchPaths,
   getDefaultCommandsPath,
   getDefaultWorkflowsPath,
+  getHomeWorkflowsPath,
   getArchonWorkspacesPath,
   getHomeCommandsPath,
   getRunArtifactsPath,
@@ -2278,6 +2279,26 @@ export function registerApiRoutes(
             getLog().error({ err, name }, 'workflow.fetch_failed');
             return apiError(c, 500, 'Failed to read workflow');
           }
+        }
+      }
+
+      // 1b. Try user-defined workflow in Archon home (~/.archon/workflows)
+      const homeFilePath = join(getHomeWorkflowsPath(), filename);
+      try {
+        const content = await readFile(homeFilePath, 'utf-8');
+        const result = parseWorkflow(content, filename);
+        if (result.error) {
+          return apiError(c, 500, `Workflow file is invalid: ${result.error.error}`);
+        }
+        return c.json({
+          workflow: result.workflow,
+          filename,
+          source: 'global' as WorkflowSource,
+        });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+          getLog().error({ err, name }, 'workflow.fetch_home_failed');
+          return apiError(c, 500, 'Failed to read home workflow');
         }
       }
 

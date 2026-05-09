@@ -253,6 +253,37 @@ describe('GET /api/workflows/:name', () => {
     }
   });
 
+  test('returns home workflow with source:global when file exists under Archon home', async () => {
+    const testArchonHome = join(tmpdir(), `wf-home-test-${Date.now()}`);
+    const workflowDir = join(testArchonHome, 'workflows');
+    process.env.ARCHON_HOME = testArchonHome;
+    await mkdir(workflowDir, { recursive: true });
+    await writeFile(
+      join(workflowDir, 'home-only.yaml'),
+      'name: home-only\ndescription: Home scoped\nnodes:\n  - id: plan\n    command: plan\n'
+    );
+
+    try {
+      const app = createTestApp();
+      registerApiRoutes(app, {} as WebAdapter, {} as ConversationLockManager);
+
+      mockListCodebases.mockImplementationOnce(async () => []);
+      const response = await app.request('/api/workflows/home-only');
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        source: string;
+        filename: string;
+        workflow: { name: string };
+      };
+      expect(body.source).toBe('global');
+      expect(body.filename).toBe('home-only.yaml');
+      expect(body.workflow).toBeDefined();
+    } finally {
+      delete process.env.ARCHON_HOME;
+      await rm(testArchonHome, { recursive: true, force: true });
+    }
+  });
+
   test('returns WorkflowDefinition shape with expected top-level fields', async () => {
     const app = createTestApp();
     registerApiRoutes(app, {} as WebAdapter, {} as ConversationLockManager);

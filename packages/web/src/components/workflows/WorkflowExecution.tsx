@@ -24,7 +24,7 @@ import type {
   LoopIterationInfo,
 } from '@/lib/types';
 
-import type { WorkflowEventResponse } from '@/lib/api';
+import type { DagNode, WorkflowEventResponse } from '@/lib/api';
 
 /** Tool call event extracted from workflow_events for display in WorkflowLogs. */
 export interface ToolEvent {
@@ -366,6 +366,19 @@ export function WorkflowExecution({ runId }: WorkflowExecutionProps): React.Reac
     };
   })();
 
+  const graphDagNodes = useMemo((): readonly DagNode[] | null => {
+    if (dagDefinitionNodes) return dagDefinitionNodes;
+
+    const sourceNodes = workflow?.dagNodes ?? initialData?.dagNodes ?? [];
+    if (sourceNodes.length === 0) return null;
+
+    return sourceNodes.map((node): DagNode => ({
+      id: node.nodeId,
+      command: node.name || node.nodeId,
+      depends_on: [],
+    }));
+  }, [dagDefinitionNodes, workflow?.dagNodes, initialData?.dagNodes]);
+
   // Auto-select the first DAG node when workflow data loads and no node is selected.
   // Prefer the currently executing node (for running workflows), otherwise pick the first node.
   useEffect(() => {
@@ -593,9 +606,9 @@ export function WorkflowExecution({ runId }: WorkflowExecutionProps): React.Reac
       return (
         <ResizablePanelGroup orientation="horizontal" className="flex-1 min-h-0">
           <ResizablePanel defaultSize={60} minSize={30}>
-            {dagDefinitionNodes ? (
+            {graphDagNodes ? (
               <WorkflowDagViewer
-                dagNodes={dagDefinitionNodes}
+                dagNodes={graphDagNodes}
                 liveStatus={workflow.dagNodes}
                 isRunning={isRunning}
                 currentlyExecuting={currentlyExecuting ?? undefined}

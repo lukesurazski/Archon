@@ -95,7 +95,14 @@ function buildSubprocessEnv(): NodeJS.ProcessEnv {
     { authMode },
     authMode === 'global' ? 'using_global_auth' : 'using_explicit_tokens'
   );
-  return { ...process.env };
+  const env = { ...process.env };
+  // Anthropic's Agent SDK documents ANTHROPIC_API_KEY as the API-key auth input.
+  // Preserve an explicitly provided ANTHROPIC_API_KEY, otherwise mirror CLAUDE_API_KEY
+  // so existing Archon configs continue to authenticate via API key.
+  if (!env.ANTHROPIC_API_KEY && env.CLAUDE_API_KEY) {
+    env.ANTHROPIC_API_KEY = env.CLAUDE_API_KEY;
+  }
+  return env;
 }
 
 /** Max retries for transient subprocess failures */
