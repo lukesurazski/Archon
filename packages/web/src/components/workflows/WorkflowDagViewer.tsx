@@ -29,7 +29,6 @@ const STATUS_MINIMAP_COLORS: Partial<Record<WorkflowStepStatus, string>> = {
   failed: 'var(--error)',
   skipped: 'var(--text-tertiary)',
 };
-const DEFAULT_MINIMAP_COLOR = 'var(--surface-elevated)';
 
 const EDGE_STROKE_BY_STATUS: Partial<Record<WorkflowStepStatus, string>> = {
   completed: 'var(--success)',
@@ -37,6 +36,9 @@ const EDGE_STROKE_BY_STATUS: Partial<Record<WorkflowStepStatus, string>> = {
   failed: 'var(--error)',
 };
 const DEFAULT_EDGE_STROKE = 'var(--border)';
+const MINIMAP_NODE_THRESHOLD = 8;
+const MINIMAP_MARKER_WIDTH = 110;
+const MINIMAP_MARKER_HEIGHT = 42;
 
 interface WorkflowDagViewerProps {
   dagNodes: readonly DagNode[];
@@ -45,6 +47,57 @@ interface WorkflowDagViewerProps {
   currentlyExecuting?: { nodeName: string; startedAt: number };
   selectedNodeId?: string | null;
   onNodeClick?: (nodeId: string) => void;
+}
+
+interface MiniMapNodeMarkerProps {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  color?: string;
+  strokeColor?: string;
+  selected: boolean;
+  onClick?: (event: React.MouseEvent, id: string) => void;
+}
+
+function MiniMapNodeMarker({
+  id,
+  x,
+  y,
+  width,
+  height,
+  color,
+  strokeColor,
+  selected,
+  onClick,
+}: MiniMapNodeMarkerProps): React.ReactElement {
+  const markerWidth = Math.max(width, MINIMAP_MARKER_WIDTH);
+  const markerHeight = Math.max(height, MINIMAP_MARKER_HEIGHT);
+  const markerX = x + width / 2 - markerWidth / 2;
+  const markerY = y + height / 2 - markerHeight / 2;
+
+  return (
+    <rect
+      x={markerX}
+      y={markerY}
+      width={markerWidth}
+      height={markerHeight}
+      rx={10}
+      ry={10}
+      fill={color ?? 'var(--text-tertiary)'}
+      stroke={selected ? 'var(--accent-bright)' : (strokeColor ?? 'var(--background)')}
+      strokeWidth={selected ? 14 : 8}
+      opacity={selected ? 1 : 0.9}
+      onClick={
+        onClick
+          ? (event): void => {
+              onClick(event, id);
+            }
+          : undefined
+      }
+    />
+  );
 }
 
 export function WorkflowDagViewer({
@@ -110,6 +163,9 @@ export function WorkflowDagViewer({
     });
   }, [layoutedEdges, statusMap]);
 
+  const showMiniMap =
+    nodes.length >= MINIMAP_NODE_THRESHOLD || edges.length >= MINIMAP_NODE_THRESHOLD;
+
   return (
     <div className="h-full w-full relative">
       {isRunning && currentlyExecuting && (
@@ -145,14 +201,26 @@ export function WorkflowDagViewer({
         >
           <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="var(--border)" />
           <Controls showInteractive={false} className="!bg-surface !border-border" />
-          <MiniMap
-            nodeColor={(node): string => {
-              const data = node.data as ExecutionNodeData;
-              return (data.status && STATUS_MINIMAP_COLORS[data.status]) ?? DEFAULT_MINIMAP_COLOR;
-            }}
-            className="!bg-surface !border-border"
-            maskColor="rgba(0, 0, 0, 0.6)"
-          />
+          {showMiniMap && (
+            <MiniMap
+              nodeColor={(node): string => {
+                const data = node.data as ExecutionNodeData;
+                return (
+                  (data.status && STATUS_MINIMAP_COLORS[data.status]) ?? 'var(--text-tertiary)'
+                );
+              }}
+              nodeStrokeColor="var(--background)"
+              nodeStrokeWidth={8}
+              nodeComponent={MiniMapNodeMarker}
+              nodeBorderRadius={6}
+              bgColor="var(--surface-inset)"
+              maskColor="transparent"
+              maskStrokeColor="transparent"
+              maskStrokeWidth={0}
+              className="!w-[180px] !h-[120px] !overflow-hidden !bg-surface-inset !border !border-border !rounded-md !shadow-lg [&_.react-flow__minimap-svg]:!overflow-hidden"
+              ariaLabel="Workflow graph minimap"
+            />
+          )}
         </ReactFlow>
       </ReactFlowProvider>
     </div>
