@@ -30,13 +30,14 @@ const MODEL_EXAMPLES: Record<string, string[]> = {
 
 function formatSecretHint(value: string): string {
   const trimmed = value.trim();
-  if (trimmed.length <= 4) return `…${trimmed}`;
+  if (trimmed.length === 0) return '…';
+  if (trimmed.length <= 4) return '…****';
   return `…${trimmed.slice(-4)}`;
 }
 
 function hasNonEmptyEnv(name: string): boolean {
   const value = process.env[name];
-  return typeof value === 'string' && value.length > 0;
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 function configuredModel(
@@ -91,14 +92,18 @@ function buildClaudeDiagnostics(
     mode = oauthToken ? 'explicit-oauth-token' : 'explicit-api-key';
     notes.push('Explicit Claude credentials detected in environment variables.');
   } else if (useGlobalAuth === 'true') {
-    notes.push('Configured to rely on claude /login credentials, but access is not verified offline.');
+    notes.push(
+      'Configured to rely on claude /login credentials, but access is not verified offline.'
+    );
   } else if (useGlobalAuth === 'false') {
     mode = 'explicit-required-but-missing';
     available = false;
     verified = false;
     notes.push('CLAUDE_USE_GLOBAL_AUTH=false requires explicit Claude env credentials.');
   } else {
-    notes.push('No explicit Claude env credentials detected; Archon will attempt Claude global auth.');
+    notes.push(
+      'No explicit Claude env credentials detected; Archon will attempt Claude global auth.'
+    );
   }
 
   return {
@@ -191,7 +196,9 @@ function buildCodexDiagnostics(
       configured: configuredModel(entry.id, assistants),
       examples: MODEL_EXAMPLES.codex,
       accessVerified: false,
-      notes: ['Codex account/model entitlement is not verified until the SDK completes a live request.'],
+      notes: [
+        'Codex account/model entitlement is not verified until the SDK completes a live request.',
+      ],
     },
   };
 }
@@ -229,7 +236,11 @@ function buildPiDiagnostics(
     credentialStatus: {
       available: filePresent || presentEnvSources.length > 0,
       verified: filePresent || presentEnvSources.length > 0,
-      mode: filePresent ? 'auth-file-or-env' : presentEnvSources.length > 0 ? 'env-api-keys' : 'missing',
+      mode: filePresent
+        ? 'auth-file-or-env'
+        : presentEnvSources.length > 0
+          ? 'env-api-keys'
+          : 'missing',
       activeCredentialHint:
         presentEnvSources.length > 0 ? presentEnvSources[0].displayHint : undefined,
       sources: [

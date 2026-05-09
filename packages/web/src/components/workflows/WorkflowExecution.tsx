@@ -444,18 +444,17 @@ export function WorkflowExecution({ runId }: WorkflowExecutionProps): React.Reac
         }
         case 'loop_iteration_failed':
           return `[${ts}] Iteration ${String(e.data.iteration)} failed: ${(e.data.error as string | undefined) ?? 'Unknown error'}`;
-        case 'node_started':
-          return (() => {
-            const details = [
-              e.data.provider_id as string | undefined,
-              e.data.auth_mode as string | undefined,
-              e.data.credential_hint as string | undefined,
-              e.data.model as string | undefined,
-            ]
-              .filter(Boolean)
-              .join(' • ');
-            return `[${ts}] Node started: ${e.step_name ?? 'node'}${details ? ` ${details}` : ''}`;
-          })();
+        case 'node_started': {
+          const details = [
+            e.data.provider_id as string | undefined,
+            e.data.auth_mode as string | undefined,
+            e.data.credential_hint as string | undefined,
+            e.data.model as string | undefined,
+          ]
+            .filter(Boolean)
+            .join(' • ');
+          return `[${ts}] Node started: ${e.step_name ?? 'node'}${details ? ` ${details}` : ''}`;
+        }
         case 'node_completed':
           return `[${ts}] Node completed: ${e.step_name ?? 'node'}`;
         case 'node_failed':
@@ -497,15 +496,13 @@ export function WorkflowExecution({ runId }: WorkflowExecutionProps): React.Reac
     return workflow?.dagNodes.find(node => node.nodeId === selectedDagNode) ?? null;
   }, [workflow?.dagNodes, selectedDagNode]);
   const selectedNodeMetaBadges = [
-    selectedNodeMeta?.providerId
-      ? { label: 'Provider', value: selectedNodeMeta.providerId }
-      : null,
+    selectedNodeMeta?.providerId ? { label: 'Provider', value: selectedNodeMeta.providerId } : null,
     selectedNodeMeta?.authMode ? { label: 'Auth', value: selectedNodeMeta.authMode } : null,
     selectedNodeMeta?.credentialHint
       ? { label: 'Key', value: selectedNodeMeta.credentialHint }
       : null,
     selectedNodeMeta?.model ? { label: 'Model', value: selectedNodeMeta.model } : null,
-  ].filter(Boolean) as Array<{ label: string; value: string }>;
+  ].filter((badge): badge is { label: string; value: string } => badge !== null);
 
   // Handler for user-initiated node clicks (graph or sidebar).
   // Increments scroll trigger so WorkflowLogs scrolls to the node's section.

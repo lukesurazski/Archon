@@ -10,6 +10,7 @@ const providerCapabilitiesSchema = z
     mcp: z.boolean(),
     hooks: z.boolean(),
     skills: z.boolean(),
+    agents: z.boolean(),
     toolRestrictions: z.boolean(),
     structuredOutput: z.boolean(),
     envInjection: z.boolean(),

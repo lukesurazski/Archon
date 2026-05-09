@@ -103,7 +103,7 @@ Verify you are on the correct PR branch (should be `$HEAD_BRANCH`).
 
 Same process as CRITICAL.
 
-### 2.3 For Each MEDIUMN Issue
+### 2.3 For Each MEDIUM Issue
 
 Same process as CRITICAL.
 

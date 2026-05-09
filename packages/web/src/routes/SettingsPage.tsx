@@ -710,9 +710,7 @@ function ProviderDiagnosticsSection(): React.ReactElement {
                       <div key={`${provider.id}-model-note-${note}`}>{note}</div>
                     ))}
                     {provider.modelStatus.examples.length > 0 && (
-                      <div>
-                        Example models: {provider.modelStatus.examples.join(', ')}
-                      </div>
+                      <div>Example models: {provider.modelStatus.examples.join(', ')}</div>
                     )}
                   </div>
                 )}

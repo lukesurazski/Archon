@@ -25,7 +25,7 @@ function DagNodeItem({
     node.authMode ? { label: 'Auth', value: node.authMode } : null,
     node.credentialHint ? { label: 'Key', value: node.credentialHint } : null,
     node.model ? { label: 'Model', value: node.model } : null,
-  ].filter(Boolean) as Array<{ label: string; value: string }>;
+  ].filter((badge): badge is { label: string; value: string } => badge !== null);
 
   return (
     <div>

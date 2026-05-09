@@ -2433,7 +2433,11 @@ async function executeApprovalNode(
       ...(node.idle_timeout ? { idle_timeout: node.idle_timeout } : {}),
     };
 
-    const { provider, model, options: nodeOptions } = await resolveNodeProviderAndModel(
+    const {
+      provider,
+      model,
+      options: nodeOptions,
+    } = await resolveNodeProviderAndModel(
       syntheticNode,
       workflowProvider,
       workflowModel,
@@ -2882,7 +2886,11 @@ export async function executeDagWorkflow(
           }
 
           // 4. Resolve per-node provider/model/options
-          const { provider, model, options: nodeOptions } = await resolveNodeProviderAndModel(
+          const {
+            provider,
+            model,
+            options: nodeOptions,
+          } = await resolveNodeProviderAndModel(
             node,
             workflowProvider,
             workflowModel,
