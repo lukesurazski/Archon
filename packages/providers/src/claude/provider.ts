@@ -95,7 +95,14 @@ function buildSubprocessEnv(): NodeJS.ProcessEnv {
     { authMode },
     authMode === 'global' ? 'using_global_auth' : 'using_explicit_tokens'
   );
-  return { ...process.env };
+  const env = { ...process.env };
+  // Anthropic's Agent SDK documents ANTHROPIC_API_KEY as the API-key auth input.
+  // Preserve an explicitly provided ANTHROPIC_API_KEY, otherwise mirror CLAUDE_API_KEY
+  // so existing Archon configs continue to authenticate via API key.
+  if (!env.ANTHROPIC_API_KEY && env.CLAUDE_API_KEY) {
+    env.ANTHROPIC_API_KEY = env.CLAUDE_API_KEY;
+  }
+  return env;
 }
 
 /** Max retries for transient subprocess failures */
@@ -938,7 +945,14 @@ export class ClaudeProvider implements IAgentProvider {
 
     // Build subprocess env once (avoids re-logging auth mode per retry)
     const subprocessEnv = buildSubprocessEnv();
-    const env = requestOptions?.env ? { ...subprocessEnv, ...requestOptions.env } : subprocessEnv;
+    const env = requestOptions?.env
+      ? { ...subprocessEnv, ...requestOptions.env }
+      : { ...subprocessEnv };
+    // Re-apply CLAUDE_API_KEY → ANTHROPIC_API_KEY mirror after merge so a
+    // request-level env that supplies only CLAUDE_API_KEY still authenticates.
+    if (!env.ANTHROPIC_API_KEY && env.CLAUDE_API_KEY) {
+      env.ANTHROPIC_API_KEY = env.CLAUDE_API_KEY;
+    }
 
     // Apply nodeConfig translation once (deterministic, not retry-dependent)
     // We need a throwaway Options to extract warnings from applyNodeConfig,
