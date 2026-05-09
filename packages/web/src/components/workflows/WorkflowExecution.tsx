@@ -372,11 +372,13 @@ export function WorkflowExecution({ runId }: WorkflowExecutionProps): React.Reac
     const sourceNodes = workflow?.dagNodes ?? initialData?.dagNodes ?? [];
     if (sourceNodes.length === 0) return null;
 
-    return sourceNodes.map((node): DagNode => ({
-      id: node.nodeId,
-      command: node.name || node.nodeId,
-      depends_on: [],
-    }));
+    return sourceNodes.map(
+      (node): DagNode => ({
+        id: node.nodeId,
+        command: node.name || node.nodeId,
+        depends_on: [],
+      })
+    );
   }, [dagDefinitionNodes, workflow?.dagNodes, initialData?.dagNodes]);
 
   // Auto-select the first DAG node when workflow data loads and no node is selected.

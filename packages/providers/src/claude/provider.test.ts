@@ -836,6 +836,39 @@ describe('ClaudeProvider', () => {
       expect(env.ANTHROPIC_API_KEY).toBe('sk-ant-test-claude-key');
     });
 
+    test('mirrors CLAUDE_API_KEY into ANTHROPIC_API_KEY when supplied only via requestOptions.env', async () => {
+      mockQuery.mockImplementation(async function* () {
+        yield { type: 'result', session_id: 'sid' };
+      });
+
+      const savedClaudeApiKey = process.env.CLAUDE_API_KEY;
+      const savedAnthropicApiKey = process.env.ANTHROPIC_API_KEY;
+      delete process.env.CLAUDE_API_KEY;
+      delete process.env.ANTHROPIC_API_KEY;
+
+      try {
+        for await (const _ of client.sendQuery('test', '/tmp', undefined, {
+          env: { CLAUDE_API_KEY: 'sk-ant-request-only-key' },
+        })) {
+          // consume
+        }
+      } finally {
+        if (savedClaudeApiKey !== undefined) process.env.CLAUDE_API_KEY = savedClaudeApiKey;
+        else delete process.env.CLAUDE_API_KEY;
+        if (savedAnthropicApiKey !== undefined) {
+          process.env.ANTHROPIC_API_KEY = savedAnthropicApiKey;
+        } else {
+          delete process.env.ANTHROPIC_API_KEY;
+        }
+      }
+
+      expect(mockQuery).toHaveBeenCalledTimes(1);
+      const callArgs = mockQuery.mock.calls[0][0] as { options: Record<string, unknown> };
+      const env = callArgs.options.env as Record<string, string>;
+      expect(env.CLAUDE_API_KEY).toBe('sk-ant-request-only-key');
+      expect(env.ANTHROPIC_API_KEY).toBe('sk-ant-request-only-key');
+    });
+
     test('passes effort to SDK via nodeConfig', async () => {
       mockQuery.mockImplementation(async function* () {
         yield { type: 'result', session_id: 'sid' };
