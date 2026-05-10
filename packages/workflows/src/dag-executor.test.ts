@@ -2168,7 +2168,10 @@ describe('executeDagWorkflow -- provider tool safety', () => {
     );
     expect(getDisallowedToolPath('Edit', { file_path: 'src.ts' }, testDir)).toBeNull();
     expect(
-      getDisallowedToolPath('Read', { file_path: join(outsideDir, 'artifact.md') }, testDir, [
+      getDisallowedToolPath('Read', { file_path: join(outsideDir, 'artifact.md') }, testDir)
+    ).toBeNull();
+    expect(
+      getDisallowedToolPath('Write', { file_path: join(outsideDir, 'artifact.md') }, testDir, [
         outsideDir,
       ])
     ).toBeNull();
@@ -2183,10 +2186,35 @@ describe('executeDagWorkflow -- provider tool safety', () => {
     expect(
       getDisallowedToolPath('Bash', { command: `cat ${join(outsideDir, 'src.ts')}` }, testDir)
     ).toBeNull();
+    expect(
+      getDisallowedToolPath(
+        'Bash',
+        {
+          command: `cat ${join(outsideDir, 'tool-results', 'result.txt')} | wc -l`,
+        },
+        testDir
+      )
+    ).toBeNull();
     const blockedBashPath = join(dirname(dirname(tmpdir())), 'archon-outside-src.ts');
     expect(
       getDisallowedToolPath('Bash', { command: `echo hi > ${blockedBashPath}` }, testDir)
     ).toBe(blockedBashPath);
+    expect(
+      getDisallowedToolPath(
+        'Bash',
+        {
+          command: `cat > ${join(testDir, 'scope.md')} <<'EOF'\n# PR Review Scope\nArtifact path: /pr-review/scope.md\nEOF`,
+        },
+        testDir
+      )
+    ).toBeNull();
+    expect(
+      getDisallowedToolPath(
+        'Bash',
+        { command: `gh pr checks 4 2>/dev/null && echo ok > ${join(testDir, 'checks.txt')}` },
+        testDir
+      )
+    ).toBeNull();
     expect(
       getDisallowedToolPath(
         'Bash',

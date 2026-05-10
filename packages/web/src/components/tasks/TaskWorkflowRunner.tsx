@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ChevronDown, Loader2, Play, RotateCcw, Square } from 'lucide-react';
+import { AlertTriangle, ChevronDown, Loader2, Play, RotateCcw, Square } from 'lucide-react';
 import {
   cancelWorkflowRun,
   createConversation,
@@ -10,7 +10,10 @@ import {
   listWorkflows,
   runWorkflow,
 } from '@/lib/api';
+import { useDashboardSSE } from '@/hooks/useDashboardSSE';
 import type { TaskDetailResponse, WorkflowListEntry, WorkflowRunResponse } from '@/lib/api';
+import type { WorkflowState } from '@/lib/types';
+import { useWorkflowStore } from '@/stores/workflow-store';
 import { cn } from '@/lib/utils';
 
 interface TaskWorkflowRunnerProps {
@@ -105,9 +108,99 @@ function getTaskDefaultForInputs(
   return contextualInput ? getTaskDefaultForInput(task, contextualInput) : '';
 }
 
+function getRunProgress(
+  liveRun: WorkflowState | undefined,
+  status: WorkflowRunResponse['status']
+): {
+  completed: number;
+  failed: number;
+  failureError: string | null;
+  failureLabel: string | null;
+  label: string | null;
+  percent: number;
+  total: number;
+} {
+  const nodes = liveRun?.dagNodes ?? [];
+  const total = nodes.length;
+  const completed = nodes.filter(
+    node => node.status === 'completed' || node.status === 'skipped'
+  ).length;
+  const failedNodes = nodes.filter(node => node.status === 'failed');
+  const runningNode = nodes.find(node => node.status === 'running');
+  const failedNode = failedNodes[0];
+  const active = isActiveRun(status);
+  const percent =
+    total > 0
+      ? Math.max(active ? 8 : 0, Math.round((completed / total) * 100))
+      : status === 'completed'
+        ? 100
+        : active
+          ? 8
+          : 0;
+
+  if (total > 0) {
+    const detailNode = runningNode ?? failedNode;
+    return {
+      completed,
+      failed: failedNodes.length,
+      failureError: failedNode?.error ?? null,
+      failureLabel: failedNode?.name ?? null,
+      total,
+      percent,
+      label: detailNode ? detailNode.name : `${completed}/${total} steps`,
+    };
+  }
+
+  if (liveRun?.currentTool?.status === 'running') {
+    return {
+      completed,
+      failed: failedNodes.length,
+      failureError: failedNode?.error ?? null,
+      failureLabel: failedNode?.name ?? null,
+      total,
+      percent,
+      label: `Running ${liveRun.currentTool.name}`,
+    };
+  }
+
+  if (active) {
+    return {
+      completed,
+      failed: failedNodes.length,
+      failureError: failedNode?.error ?? null,
+      failureLabel: failedNode?.name ?? null,
+      total,
+      percent,
+      label: 'Starting workflow...',
+    };
+  }
+  return {
+    completed,
+    failed: failedNodes.length,
+    failureError: failedNode?.error ?? null,
+    failureLabel: failedNode?.name ?? null,
+    total,
+    percent,
+    label: null,
+  };
+}
+
+function RunningGlyph(): React.ReactElement {
+  return (
+    <span
+      aria-label="Workflow is running"
+      className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary"
+    >
+      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+    </span>
+  );
+}
+
 export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): React.ReactElement {
+  useDashboardSSE();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const workflowStates = useWorkflowStore(state => state.workflows);
   const [selectedWorkflow, setSelectedWorkflow] = useState('');
   const [workflowSearch, setWorkflowSearch] = useState('');
   const [workflowPickerOpen, setWorkflowPickerOpen] = useState(false);
@@ -124,11 +217,19 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
     refetchInterval: 30_000,
   });
 
-  const { data: runs } = useQuery({
+  const { data: runs, refetch: refetchRuns } = useQuery({
     queryKey: ['workflow-runs', { taskId: task.id }],
     queryFn: () => listWorkflowRuns({ taskId: task.id, limit: 25 }),
     initialData: task.workflow_runs,
-    refetchInterval: 10_000,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
+    refetchInterval: query => {
+      const currentRuns = query.state.data ?? [];
+      const hasActiveRun = currentRuns.some(run =>
+        isActiveRun(workflowStates.get(run.id)?.status ?? run.status)
+      );
+      return hasActiveRun ? 3_000 : 15_000;
+    },
   });
 
   const sortedWorkflows = useMemo(
@@ -179,6 +280,20 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
     });
   }
 
+  function refreshTaskWorkflowData(): void {
+    void refetchRuns();
+    void queryClient.invalidateQueries({ queryKey: ['workflow-runs', { taskId: task.id }] });
+    void queryClient.invalidateQueries({ queryKey: ['task', task.id] });
+    void queryClient.invalidateQueries({ queryKey: ['tasks'] });
+  }
+
+  function scheduleWorkflowHistoryRefresh(): void {
+    refreshTaskWorkflowData();
+    for (const delay of [500, 1_500, 3_000, 6_000, 10_000]) {
+      setTimeout(refreshTaskWorkflowData, delay);
+    }
+  }
+
   const runMutation = useMutation({
     mutationFn: async () => {
       if (!selectedWorkflow || !message.trim()) return;
@@ -210,9 +325,7 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
       setWorkflowSearch('');
       setMessage('');
       setError(null);
-      void queryClient.invalidateQueries({ queryKey: ['workflow-runs', { taskId: task.id }] });
-      void queryClient.invalidateQueries({ queryKey: ['task', task.id] });
-      void queryClient.invalidateQueries({ queryKey: ['tasks'] });
+      scheduleWorkflowHistoryRefresh();
       if (conversationId) {
         navigate(
           `/chat/tasks/${encodeURIComponent(task.id)}/chats/${encodeURIComponent(conversationId)}`
@@ -253,9 +366,7 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
     },
     onSuccess: () => {
       setError(null);
-      void queryClient.invalidateQueries({ queryKey: ['workflow-runs', { taskId: task.id }] });
-      void queryClient.invalidateQueries({ queryKey: ['task', task.id] });
-      void queryClient.invalidateQueries({ queryKey: ['tasks'] });
+      scheduleWorkflowHistoryRefresh();
     },
     onError: err => {
       setError(err instanceof Error ? err.message : 'Failed to rerun workflow');
@@ -272,9 +383,7 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
     },
     onSuccess: () => {
       setError(null);
-      void queryClient.invalidateQueries({ queryKey: ['workflow-runs', { taskId: task.id }] });
-      void queryClient.invalidateQueries({ queryKey: ['task', task.id] });
-      void queryClient.invalidateQueries({ queryKey: ['tasks'] });
+      scheduleWorkflowHistoryRefresh();
     },
     onError: err => {
       setError(err instanceof Error ? err.message : 'Failed to stop workflow');
@@ -447,6 +556,10 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
           {runs && runs.length > 0 ? (
             <div className="divide-y divide-border/70">
               {runs.map(run => {
+                const liveRun = workflowStates.get(run.id);
+                const status = liveRun?.status ?? run.status;
+                const active = isActiveRun(status);
+                const progress = getRunProgress(liveRun, status);
                 const isCancelling = cancellingRunId === run.id;
                 const isRerunning = rerunningRunId === run.id;
                 return (
@@ -454,21 +567,28 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
                     key={run.id}
                     className={cn(
                       'grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 px-4 py-3 transition-colors hover:bg-surface-secondary/25',
-                      isActiveRun(run.status) && 'bg-primary/5'
+                      active && 'bg-primary/5',
+                      progress.failed > 0 && 'border-l-2 border-destructive/60'
                     )}
                   >
                     <div className="flex min-w-0 items-center gap-3">
                       <span
                         className={cn(
-                          'h-2.5 w-2.5 shrink-0 rounded-full',
-                          run.status === 'running' &&
-                            'bg-primary shadow-[0_0_0_4px_rgba(59,130,246,0.12)]',
-                          run.status === 'completed' && 'bg-success',
-                          run.status === 'failed' && 'bg-destructive',
-                          (run.status === 'pending' || run.status === 'paused') && 'bg-warning',
-                          run.status === 'cancelled' && 'bg-text-tertiary'
+                          'relative flex h-5 w-5 shrink-0 items-center justify-center rounded-full',
+                          active && 'bg-primary/10'
                         )}
-                      />
+                      >
+                        <span
+                          className={cn(
+                            'relative h-2.5 w-2.5 rounded-full',
+                            status === 'running' && 'bg-primary',
+                            status === 'completed' && 'bg-success',
+                            status === 'failed' && 'bg-destructive',
+                            (status === 'pending' || status === 'paused') && 'bg-warning',
+                            status === 'cancelled' && 'bg-text-tertiary'
+                          )}
+                        />
+                      </span>
                       <div className="min-w-0">
                         <div className="flex min-w-0 items-center gap-2">
                           <Link
@@ -481,17 +601,65 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
                           <span
                             className={cn(
                               'shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide',
-                              statusClass(run.status)
+                              statusClass(status)
                             )}
                           >
-                            {run.status}
+                            {status}
                           </span>
+                          {progress.failed > 0 && (
+                            <span
+                              className="inline-flex shrink-0 items-center gap-1 rounded-full bg-destructive/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-destructive/90"
+                              title={progress.failureError ?? undefined}
+                            >
+                              <AlertTriangle className="h-3 w-3" />
+                              {progress.failed} failed
+                            </span>
+                          )}
+                          {active && <RunningGlyph />}
                         </div>
                         <div className="mt-0.5 flex items-center gap-2 text-[11px] text-text-tertiary">
                           <span className="font-mono">{run.id.slice(0, 8)}</span>
                           <span aria-hidden="true">·</span>
                           <span className="tabular-nums">{formatStartedAt(run)}</span>
                         </div>
+                        {progress.failed > 0 && (
+                          <div className="mt-1 flex max-w-xl items-start gap-1.5 text-[11px] font-medium text-text-secondary">
+                            <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0 text-destructive/80" />
+                            <span className="min-w-0 truncate">
+                              {progress.failureLabel ?? 'A workflow step failed'}
+                              {progress.failureError ? `: ${progress.failureError}` : ''}
+                            </span>
+                          </div>
+                        )}
+                        {(active || progress.total > 0) && (
+                          <div className="mt-2 max-w-xl">
+                            <div className="mb-1 flex items-center justify-between gap-3 text-[10px] text-text-tertiary">
+                              <span className="truncate">
+                                {progress.label ?? 'Workflow progress'}
+                              </span>
+                              {progress.total > 0 && (
+                                <span className="shrink-0 font-mono tabular-nums">
+                                  {progress.completed}/{progress.total}
+                                </span>
+                              )}
+                            </div>
+                            <div className="h-1.5 overflow-hidden rounded-full bg-surface-secondary">
+                              <div
+                                className={cn(
+                                  'h-full rounded-full transition-all duration-500',
+                                  (status === 'failed' || progress.failed > 0) &&
+                                    'bg-destructive/70',
+                                  status === 'completed' && 'bg-success',
+                                  status !== 'failed' &&
+                                    progress.failed === 0 &&
+                                    status !== 'completed' &&
+                                    'bg-primary'
+                                )}
+                                style={{ width: `${progress.percent}%` }}
+                              />
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
                     <div className="flex shrink-0 items-center justify-end gap-1.5">
@@ -501,7 +669,7 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
                       >
                         Graph
                       </Link>
-                      {isActiveRun(run.status) ? (
+                      {active ? (
                         <button
                           type="button"
                           onClick={(): void => {

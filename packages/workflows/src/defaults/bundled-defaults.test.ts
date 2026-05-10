@@ -101,6 +101,14 @@ describe('bundled-defaults', () => {
       expect(content).toContain('workflow_name');
     });
 
+    it('archon-respond-to-pr-feedback declares a pull request input', () => {
+      const content = BUNDLED_WORKFLOWS['archon-respond-to-pr-feedback'];
+      expect(content).toContain('inputs:');
+      expect(content).toContain('name: pr');
+      expect(content).toContain('type: pull_request');
+      expect(content).toContain('required: true');
+    });
+
     it('archon-adversarial-dev init-workspace should avoid non-portable sed -i', () => {
       const content = BUNDLED_WORKFLOWS['archon-adversarial-dev'];
       expect(content).toContain('STATE_TMP="$ARTIFACTS/state.json.tmp"');

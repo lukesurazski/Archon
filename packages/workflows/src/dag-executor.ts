@@ -194,7 +194,7 @@ function collectToolPaths(
   if (normalizedToolName === 'bash') {
     const command = toolInput.command;
     return typeof command === 'string' && mayMutateShellPaths(command)
-      ? extractShellAbsolutePaths(command)
+      ? extractMutatingShellPaths(command)
       : [];
   }
   const pathKeysByTool: Record<string, string[]> = {
@@ -228,16 +228,46 @@ function extractShellAbsolutePaths(command: string): string[] {
   let match: RegExpExecArray | null;
   while ((match = absolutePathPattern.exec(command)) !== null) {
     const path = match[1];
-    if (
-      path !== '/dev/null' &&
-      !path.startsWith('/bin/') &&
-      !path.startsWith('/usr/bin/') &&
-      !path.startsWith('/usr/local/bin/')
-    ) {
+    if (!shouldIgnoreShellPath(path)) {
       paths.push(path);
     }
   }
   return paths;
+}
+
+function shouldIgnoreShellPath(path: string): boolean {
+  return (
+    path === '/dev/null' ||
+    !path.startsWith('/') ||
+    path.startsWith('/bin/') ||
+    path.startsWith('/usr/bin/') ||
+    path.startsWith('/usr/local/bin/')
+  );
+}
+
+function extractMutatingShellPaths(command: string): string[] {
+  const paths = new Set<string>();
+
+  // Redirection targets are the write targets. Do not scan heredoc bodies or
+  // piped command output, which can contain arbitrary markdown like `/pr-*`.
+  const redirectionPattern = /(?:^|[\s])(?:\d?>{1,2}|&>)\s*(["']?)(\/[^\s"'|;&)]+)\1/g;
+  let redirectMatch: RegExpExecArray | null;
+  while ((redirectMatch = redirectionPattern.exec(command)) !== null) {
+    const path = redirectMatch[2];
+    if (!shouldIgnoreShellPath(path)) paths.add(path);
+  }
+
+  const mutatingSegmentPattern =
+    /(?:^|[;&|({]\s*)(?:rm|rmdir|mv|cp|mkdir|touch|tee|chmod|chown|install|truncate)\b([^\n;&|]*)|(?:^|[;&|({]\s*)sed\s+-i\b([^\n;&|]*)|(?:^|[;&|({]\s*)git\s+(?:checkout|reset|clean|merge|rebase|pull|worktree\s+(?:add|remove|prune))\b([^\n;&|]*)/g;
+  let segmentMatch: RegExpExecArray | null;
+  while ((segmentMatch = mutatingSegmentPattern.exec(command)) !== null) {
+    const segment = segmentMatch[1] ?? segmentMatch[2] ?? segmentMatch[3] ?? '';
+    for (const path of extractShellAbsolutePaths(segment)) {
+      paths.add(path);
+    }
+  }
+
+  return [...paths];
 }
 
 function mayMutateShellPaths(command: string): boolean {
@@ -257,6 +287,13 @@ export function getDisallowedToolPath(
   allowedRoots: readonly string[] = []
 ): string | null {
   const normalizedToolName = toolName.toLowerCase();
+  // Read-only provider tools can legitimately target provider scratch files
+  // such as Claude's tool-results cache or temporary diff files created by
+  // prior commands. The workflow safety guard is meant to prevent writes and
+  // destructive shell mutations outside the working path, not to break
+  // read-only review workflows.
+  if (['read', 'grep', 'glob', 'ls'].includes(normalizedToolName)) return null;
+
   const roots = [
     cwd,
     ...allowedRoots,
