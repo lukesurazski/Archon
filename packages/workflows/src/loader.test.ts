@@ -74,6 +74,25 @@ describe('Workflow Loader', () => {
       expect(result.workflows[0].workflow.interactive).toBeUndefined();
     });
 
+    it('should preserve workflow input metadata', async () => {
+      const workflowDir = join(testDir, '.archon', 'workflows');
+      await mkdir(workflowDir, { recursive: true });
+      const yaml = `name: test\ndescription: test\ninputs:\n  - name: pr\n    type: pull_request\n    label: Pull request\n    description: PR number or URL\n    placeholder: "123 or https://github.com/owner/repo/pull/123"\n    required: true\nnodes:\n  - id: n\n    prompt: p\n`;
+      await writeFile(join(workflowDir, 'test.yaml'), yaml);
+      const result = await discoverWorkflows(testDir, { loadDefaults: false });
+      expect(result.errors).toHaveLength(0);
+      expect(result.workflows[0].workflow.inputs).toEqual([
+        {
+          name: 'pr',
+          type: 'pull_request',
+          label: 'Pull request',
+          description: 'PR number or URL',
+          placeholder: '123 or https://github.com/owner/repo/pull/123',
+          required: true,
+        },
+      ]);
+    });
+
     it('should preserve interactive: false when explicitly set', async () => {
       const workflowDir = join(testDir, '.archon', 'workflows');
       await mkdir(workflowDir, { recursive: true });
