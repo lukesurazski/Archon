@@ -6,7 +6,12 @@
  * Captures all assistant output regardless of streaming mode for $node_id.output substitution.
  */
 import { readFile } from 'fs/promises';
-import { isAbsolute, relative as relativePath, resolve as resolvePath } from 'path';
+import {
+  dirname as dirnamePath,
+  isAbsolute,
+  relative as relativePath,
+  resolve as resolvePath,
+} from 'path';
 import { execFileAsync } from '@archon/git';
 import { discoverScriptsForCwd } from './script-discovery';
 import type {
@@ -238,7 +243,9 @@ export function getDisallowedToolPath(
   cwd: string,
   allowedRoots: readonly string[] = []
 ): string | null {
-  const roots = [cwd, ...allowedRoots].map(root => resolvePath(root));
+  const roots = [cwd, ...allowedRoots]
+    .filter(root => root.trim() !== '')
+    .map(root => resolvePath(root));
   for (const rawPath of collectToolPaths(toolName, toolInput)) {
     const resolved = isAbsolute(rawPath) ? resolvePath(rawPath) : resolvePath(cwd, rawPath);
     if (!roots.some(root => isPathInsideRoot(resolved, root))) {
@@ -246,6 +253,15 @@ export function getDisallowedToolPath(
     }
   }
   return null;
+}
+
+function getWorkflowAllowedToolRoots(cwd: string, artifactsDir: string, logDir: string): string[] {
+  const roots = [cwd, artifactsDir, logDir];
+  // Agents often create/check the run directory from its parent
+  // (`.../artifacts/runs/<run-id>`), so the artifact/log roots must include
+  // that parent. This still does not grant access to the source checkout.
+  roots.push(dirnamePath(artifactsDir), dirnamePath(logDir));
+  return [...new Set(roots.map(root => resolvePath(root)))];
 }
 
 /** A failed MCP server entry parsed from the SDK message. `segment` is the
@@ -1005,10 +1021,12 @@ async function executeNodeInternal(
         await logAssistant(logDir, workflowRun.id, msg.content);
       } else if (msg.type === 'tool' && msg.toolName) {
         const now = Date.now();
-        const disallowedPath = getDisallowedToolPath(msg.toolName, msg.toolInput, cwd, [
-          artifactsDir,
-          logDir,
-        ]);
+        const disallowedPath = getDisallowedToolPath(
+          msg.toolName,
+          msg.toolInput,
+          cwd,
+          getWorkflowAllowedToolRoots(cwd, artifactsDir, logDir)
+        );
         if (disallowedPath) {
           const errorMessage = `Tool '${msg.toolName}' in node '${node.id}' targeted path outside the workflow working path: ${disallowedPath}`;
           nodeSafetyViolation = true;
@@ -2237,10 +2255,12 @@ async function executeLoopNode(
           break; // Result is the "I'm done" signal — don't wait for subprocess to exit
         } else if (msg.type === 'tool' && msg.toolName) {
           const now = Date.now();
-          const disallowedPath = getDisallowedToolPath(msg.toolName, msg.toolInput, cwd, [
-            artifactsDir,
-            logDir,
-          ]);
+          const disallowedPath = getDisallowedToolPath(
+            msg.toolName,
+            msg.toolInput,
+            cwd,
+            getWorkflowAllowedToolRoots(cwd, artifactsDir, logDir)
+          );
           if (disallowedPath) {
             iterationAbortController.abort();
             throw new Error(

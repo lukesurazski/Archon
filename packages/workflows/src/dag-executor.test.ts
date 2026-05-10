@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, mock, spyOn, type Mock } from 'bun:test';
 import { mkdir, writeFile, rm } from 'fs/promises';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import { tmpdir } from 'os';
 import * as git from '@archon/git';
 
@@ -2171,6 +2171,14 @@ describe('executeDagWorkflow -- provider tool safety', () => {
       getDisallowedToolPath('Read', { file_path: join(outsideDir, 'artifact.md') }, testDir, [
         outsideDir,
       ])
+    ).toBeNull();
+    expect(
+      getDisallowedToolPath(
+        'Bash',
+        { command: `find ${dirname(outsideDir)} -maxdepth 1` },
+        testDir,
+        [dirname(outsideDir)]
+      )
     ).toBeNull();
     expect(
       getDisallowedToolPath('Bash', { command: `cd ${outsideDir} && git status --short` }, testDir)
