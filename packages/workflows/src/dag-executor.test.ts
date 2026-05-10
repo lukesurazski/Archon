@@ -37,6 +37,7 @@ import {
   checkTriggerRule,
   substituteNodeOutputRefs,
   executeDagWorkflow,
+  getDisallowedToolPath,
 } from './dag-executor';
 import { loadMcpConfig } from '@archon/providers/claude/provider';
 import type { DagNode, BashNode, ScriptNode, NodeOutput, WorkflowRun } from './schemas';
@@ -2112,6 +2113,184 @@ describe('executeDagWorkflow -- tool_called event persistence', () => {
       toolName: 'Write',
       toolInput: { path: '/bar', content: 'x' },
     });
+  });
+});
+
+describe('executeDagWorkflow -- provider tool safety', () => {
+  let testDir: string;
+  let outsideDir: string;
+  const previousToolTimeout = process.env.ARCHON_WORKFLOW_TOOL_CALL_TIMEOUT_MS;
+
+  beforeEach(async () => {
+    testDir = join(
+      tmpdir(),
+      `dag-tool-safety-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    );
+    outsideDir = join(
+      tmpdir(),
+      `dag-tool-safety-outside-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    );
+    const commandsDir = join(testDir, '.archon', 'commands');
+    await mkdir(commandsDir, { recursive: true });
+    await mkdir(outsideDir, { recursive: true });
+    await writeFile(join(commandsDir, 'my-cmd.md'), 'My command prompt');
+
+    mockSendQueryDag.mockClear();
+    mockGetAgentProviderDag.mockClear();
+    mockGetAgentProviderDag.mockImplementation(() => ({
+      sendQuery: mockSendQueryDag,
+      getType: () => 'claude',
+      getCapabilities: mockClaudeCapabilities,
+    }));
+  });
+
+  afterEach(async () => {
+    if (previousToolTimeout === undefined) {
+      delete process.env.ARCHON_WORKFLOW_TOOL_CALL_TIMEOUT_MS;
+    } else {
+      process.env.ARCHON_WORKFLOW_TOOL_CALL_TIMEOUT_MS = previousToolTimeout;
+    }
+    mockSendQueryDag.mockImplementation(function* () {
+      yield { type: 'assistant', content: 'DAG AI response' };
+      yield { type: 'result', sessionId: 'dag-session-id' };
+    });
+    try {
+      await rm(testDir, { recursive: true, force: true });
+      await rm(outsideDir, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+
+  it('detects file tool paths outside the workflow working path', () => {
+    expect(getDisallowedToolPath('Edit', { file_path: join(outsideDir, 'src.ts') }, testDir)).toBe(
+      join(outsideDir, 'src.ts')
+    );
+    expect(getDisallowedToolPath('Edit', { file_path: 'src.ts' }, testDir)).toBeNull();
+    expect(
+      getDisallowedToolPath('Read', { file_path: join(outsideDir, 'artifact.md') }, testDir, [
+        outsideDir,
+      ])
+    ).toBeNull();
+    expect(
+      getDisallowedToolPath('Bash', { command: `cd ${outsideDir} && git status --short` }, testDir)
+    ).toBe(outsideDir);
+  });
+
+  it('fails the workflow when a provider tool targets outside the working path', async () => {
+    const mockStore = createMockStore();
+    const mockDeps = createMockDeps(mockStore);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('dag-tool-path-guard-run');
+
+    mockSendQueryDag.mockImplementation(function* () {
+      yield {
+        type: 'tool',
+        toolName: 'Edit',
+        toolInput: { file_path: join(outsideDir, 'src.ts') },
+      };
+    });
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag-tool-path-guard',
+      testDir,
+      { name: 'dag-tool-path-guard', nodes: [node('my-cmd')] },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    const nodeFailedEvents = (mockStore.createWorkflowEvent as ReturnType<typeof mock>).mock.calls
+      .map((call: unknown[]) => call[0] as { event_type: string; data?: { error?: string } })
+      .filter(event => event.event_type === 'node_failed');
+    expect(
+      nodeFailedEvents.some(event =>
+        event.data?.error?.includes('targeted path outside the workflow working path')
+      )
+    ).toBe(true);
+    expect(mockSendQueryDag).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses workflowRun.working_path as the provider cwd when it differs from the caller cwd', async () => {
+    const sourceDir = outsideDir;
+    const mockStore = createMockStore();
+    const mockDeps = createMockDeps(mockStore);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('dag-working-path-run', { working_path: testDir });
+
+    mockSendQueryDag.mockImplementation(function* () {
+      yield { type: 'assistant', content: 'Used correct cwd' };
+      yield { type: 'result', sessionId: 'dag-working-path-session' };
+    });
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag-working-path',
+      sourceDir,
+      { name: 'dag-working-path', nodes: [node('my-cmd')] },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    expect(mockSendQueryDag.mock.calls[0][1]).toBe(testDir);
+  });
+
+  it('fails the workflow when an active provider tool exceeds the tool timeout', async () => {
+    process.env.ARCHON_WORKFLOW_TOOL_CALL_TIMEOUT_MS = '25';
+    const mockStore = createMockStore();
+    const mockDeps = createMockDeps(mockStore);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('dag-tool-timeout-run');
+
+    mockSendQueryDag.mockImplementation(async function* () {
+      yield {
+        type: 'tool',
+        toolName: 'Edit',
+        toolInput: { file_path: join(testDir, 'src.ts') },
+      };
+      await new Promise<void>(() => {});
+    });
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag-tool-timeout',
+      testDir,
+      { name: 'dag-tool-timeout', nodes: [node('my-cmd')] },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    const nodeFailedEvents = (mockStore.createWorkflowEvent as ReturnType<typeof mock>).mock.calls
+      .map((call: unknown[]) => call[0] as { event_type: string; data?: { error?: string } })
+      .filter(event => event.event_type === 'node_failed');
+    expect(
+      nodeFailedEvents.some(
+        event =>
+          event.data?.error?.includes("Tool 'Edit'") && event.data.error.includes('timed out')
+      )
+    ).toBe(true);
+    expect(mockSendQueryDag).toHaveBeenCalledTimes(1);
   });
 });
 

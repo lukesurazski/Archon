@@ -6,7 +6,7 @@
  * Captures all assistant output regardless of streaming mode for $node_id.output substitution.
  */
 import { readFile } from 'fs/promises';
-import { isAbsolute, resolve as resolvePath } from 'path';
+import { isAbsolute, relative as relativePath, resolve as resolvePath } from 'path';
 import { execFileAsync } from '@archon/git';
 import { discoverScriptsForCwd } from './script-discovery';
 import type {
@@ -20,6 +20,7 @@ import type {
   NodeConfig,
   ProviderCapabilities,
   TokenUsage,
+  MessageChunk,
 } from '@archon/providers/types';
 import {
   getProviderCapabilities,
@@ -64,7 +65,7 @@ import {
   logWorkflowComplete,
   logWorkflowError,
 } from './logger';
-import { withIdleTimeout, STEP_IDLE_TIMEOUT_MS } from './utils/idle-timeout';
+import { STEP_IDLE_TIMEOUT_MS } from './utils/idle-timeout';
 import {
   classifyError,
   detectCreditExhaustion,
@@ -85,6 +86,167 @@ function getLog(): ReturnType<typeof createLogger> {
 }
 
 const MCP_FAILURE_PREFIX = 'MCP server connection failed: ';
+const DEFAULT_TOOL_CALL_TIMEOUT_MS = 2 * 60 * 1000;
+
+function getWorkflowToolCallTimeoutMs(): number {
+  const raw = process.env.ARCHON_WORKFLOW_TOOL_CALL_TIMEOUT_MS;
+  if (!raw) return DEFAULT_TOOL_CALL_TIMEOUT_MS;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TOOL_CALL_TIMEOUT_MS;
+}
+
+interface ActiveProviderTool {
+  toolName: string;
+  startedAt: number;
+}
+
+const PROVIDER_TIMEOUT_SENTINEL = Symbol('PROVIDER_TIMEOUT');
+
+async function* withProviderTimeouts(
+  generator: AsyncGenerator<MessageChunk>,
+  idleTimeoutMs: number,
+  toolTimeoutMs: number,
+  onIdleTimeout: () => void,
+  onToolTimeout: (tool: ActiveProviderTool, elapsedMs: number) => void
+): AsyncGenerator<MessageChunk> {
+  let activeTool: ActiveProviderTool | null = null;
+  let idleStartedAt = Date.now();
+  let timedOut = false;
+
+  try {
+    while (true) {
+      const now = Date.now();
+      const timeoutMs = activeTool
+        ? Math.max(0, toolTimeoutMs - (now - activeTool.startedAt))
+        : Math.max(0, idleTimeoutMs - (now - idleStartedAt));
+
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<typeof PROVIDER_TIMEOUT_SENTINEL>(resolve => {
+        timer = setTimeout(() => {
+          resolve(PROVIDER_TIMEOUT_SENTINEL);
+        }, timeoutMs);
+      });
+      const nextPromise = generator.next();
+
+      const result = await Promise.race([nextPromise, timeoutPromise]);
+      clearTimeout(timer);
+
+      if (result === PROVIDER_TIMEOUT_SENTINEL) {
+        timedOut = true;
+        nextPromise.catch(() => {
+          // Abort cleanup owns subprocess shutdown; suppress the pending read rejection.
+        });
+        if (activeTool) {
+          onToolTimeout(activeTool, Date.now() - activeTool.startedAt);
+        } else {
+          onIdleTimeout();
+        }
+        return;
+      }
+
+      if (result.done) return;
+
+      const msg = result.value;
+      if (msg.type === 'tool') {
+        activeTool = { toolName: msg.toolName, startedAt: Date.now() };
+      } else if (activeTool && msg.type !== 'rate_limit' && msg.type !== 'thinking') {
+        // Any non-progress message after a tool means the provider is responsive
+        // again. tool_result/result are explicit completion; assistant/system
+        // chunks imply the provider moved past the tool call.
+        activeTool = null;
+        idleStartedAt = Date.now();
+      } else if (!activeTool) {
+        idleStartedAt = Date.now();
+      }
+
+      yield msg;
+    }
+  } finally {
+    if (!timedOut) {
+      try {
+        await generator.return(undefined as never);
+      } catch (e) {
+        getLog().warn({ err: e as Error }, 'provider_timeout.generator_cleanup_failed');
+      }
+    }
+  }
+}
+
+function isPathInsideRoot(path: string, root: string): boolean {
+  const resolvedPath = resolvePath(path);
+  const resolvedRoot = resolvePath(root);
+  const rel = relativePath(resolvedRoot, resolvedPath);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+function collectToolPaths(
+  toolName: string,
+  toolInput: Record<string, unknown> | undefined
+): string[] {
+  if (!toolInput) return [];
+  const normalizedToolName = toolName.toLowerCase();
+  if (normalizedToolName === 'bash') {
+    const command = toolInput.command;
+    return typeof command === 'string' ? extractShellAbsolutePaths(command) : [];
+  }
+  const pathKeysByTool: Record<string, string[]> = {
+    read: ['file_path'],
+    write: ['file_path'],
+    edit: ['file_path'],
+    multiedit: ['file_path'],
+    notebookedit: ['notebook_path'],
+    grep: ['path'],
+    glob: ['path'],
+    ls: ['path'],
+  };
+  const keys = pathKeysByTool[normalizedToolName];
+  if (!keys) return [];
+
+  const paths: string[] = [];
+  for (const key of keys) {
+    const value = toolInput[key];
+    if (typeof value === 'string' && value.trim() !== '') {
+      paths.push(value);
+    } else if (Array.isArray(value)) {
+      paths.push(...value.filter((item): item is string => typeof item === 'string'));
+    }
+  }
+  return paths;
+}
+
+function extractShellAbsolutePaths(command: string): string[] {
+  const paths: string[] = [];
+  const absolutePathPattern = /(?:^|[\s"'=])((?:\/[A-Za-z0-9._~+-]+)+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = absolutePathPattern.exec(command)) !== null) {
+    const path = match[1];
+    if (
+      path !== '/dev/null' &&
+      !path.startsWith('/bin/') &&
+      !path.startsWith('/usr/bin/') &&
+      !path.startsWith('/usr/local/bin/')
+    ) {
+      paths.push(path);
+    }
+  }
+  return paths;
+}
+
+export function getDisallowedToolPath(
+  toolName: string,
+  toolInput: Record<string, unknown> | undefined,
+  cwd: string,
+  allowedRoots: readonly string[] = []
+): string | null {
+  const roots = [cwd, ...allowedRoots].map(root => resolvePath(root));
+  for (const rawPath of collectToolPaths(toolName, toolInput)) {
+    const resolved = isAbsolute(rawPath) ? resolvePath(rawPath) : resolvePath(cwd, rawPath);
+    if (!roots.some(root => isPathInsideRoot(resolved, root))) {
+      return resolved;
+    }
+  }
+  return null;
+}
 
 /** A failed MCP server entry parsed from the SDK message. `segment` is the
  *  original substring (e.g. `"telegram (disconnected)"`) so callers can
@@ -228,6 +390,13 @@ function getEffectiveNodeRetryConfig(node: DagNode): {
  */
 function isTransientNodeError(errorMessage: string): boolean {
   return classifyError(new Error(errorMessage)) === 'TRANSIENT';
+}
+
+function isNonRetryableWorkflowSafetyError(errorMessage: string): boolean {
+  return (
+    errorMessage.includes('targeted path outside the workflow working path') ||
+    errorMessage.includes('without producing a result')
+  );
 }
 
 interface NodeProviderDisplayMeta {
@@ -736,18 +905,36 @@ async function executeNodeInternal(
     ...(shouldForkSession ? { forkSession: true } : {}),
   };
   let nodeIdleTimedOut = false;
+  let nodeToolTimedOut: { toolName: string; elapsedMs: number } | null = null;
+  let nodeSafetyViolation = false;
   const effectiveIdleTimeout = node.idle_timeout ?? STEP_IDLE_TIMEOUT_MS;
+  const effectiveToolTimeout = Math.min(effectiveIdleTimeout, getWorkflowToolCallTimeoutMs());
   let lastToolStartedAt: { toolName: string; startedAt: number } | null = null;
 
   try {
-    for await (const msg of withIdleTimeout(
-      aiClient.sendQuery(finalPrompt, cwd, resumeSessionId, nodeOptionsWithAbort),
+    const providerStream = aiClient.sendQuery(
+      finalPrompt,
+      cwd,
+      resumeSessionId,
+      nodeOptionsWithAbort
+    );
+    for await (const msg of withProviderTimeouts(
+      providerStream,
       effectiveIdleTimeout,
+      effectiveToolTimeout,
       () => {
         nodeIdleTimedOut = true;
         getLog().warn(
           { nodeId: node.id, timeoutMs: effectiveIdleTimeout },
           'dag_node_idle_timeout_reached'
+        );
+        nodeAbortController.abort();
+      },
+      (tool, elapsedMs) => {
+        nodeToolTimedOut = { toolName: tool.toolName, elapsedMs };
+        getLog().warn(
+          { nodeId: node.id, toolName: tool.toolName, timeoutMs: effectiveToolTimeout, elapsedMs },
+          'dag_node_tool_timeout_reached'
         );
         nodeAbortController.abort();
       }
@@ -818,6 +1005,16 @@ async function executeNodeInternal(
         await logAssistant(logDir, workflowRun.id, msg.content);
       } else if (msg.type === 'tool' && msg.toolName) {
         const now = Date.now();
+        const disallowedPath = getDisallowedToolPath(msg.toolName, msg.toolInput, cwd, [
+          artifactsDir,
+          logDir,
+        ]);
+        if (disallowedPath) {
+          const errorMessage = `Tool '${msg.toolName}' in node '${node.id}' targeted path outside the workflow working path: ${disallowedPath}`;
+          nodeSafetyViolation = true;
+          nodeAbortController.abort();
+          throw new Error(errorMessage);
+        }
 
         // Emit tool_completed for the previous tool (fire-and-forget)
         if (lastToolStartedAt) {
@@ -1069,8 +1266,46 @@ async function executeNodeInternal(
       );
     }
 
+    if (nodeToolTimedOut) {
+      const timedOutTool = nodeToolTimedOut as { toolName: string; elapsedMs: number };
+      const duration = Date.now() - nodeStartTime;
+      const timeoutError = `Tool '${timedOutTool.toolName}' in node '${node.id}' timed out after ${String(Math.round(timedOutTool.elapsedMs / 1000))}s without producing a result.`;
+      getLog().warn(
+        { nodeId: node.id, toolName: timedOutTool.toolName, durationMs: duration },
+        'dag_node_tool_timeout_failed'
+      );
+      await logNodeError(logDir, workflowRun.id, node.id, timeoutError);
+
+      deps.store
+        .createWorkflowEvent({
+          workflow_run_id: workflowRun.id,
+          event_type: 'node_failed',
+          step_name: node.id,
+          data: { error: timeoutError, duration_ms: duration },
+        })
+        .catch((err: Error) => {
+          getLog().error(
+            { err, workflowRunId: workflowRun.id, eventType: 'node_failed' },
+            'workflow_event_persist_failed'
+          );
+        });
+
+      emitter.emit({
+        type: 'node_failed',
+        runId: workflowRun.id,
+        nodeId: node.id,
+        nodeName: node.command ?? node.id,
+        error: timeoutError,
+      });
+
+      lastNodeCancelCheck.delete(`${workflowRun.id}:${node.id}`);
+      lastNodeActivityUpdate.delete(`${workflowRun.id}:${node.id}`);
+
+      return { state: 'failed', output: nodeOutputText, error: timeoutError };
+    }
+
     // If cancelled during streaming (not idle timeout), return as failed with cancel reason
-    if (nodeAbortController.signal.aborted && !nodeIdleTimedOut) {
+    if (nodeAbortController.signal.aborted && !nodeIdleTimedOut && !nodeToolTimedOut) {
       const duration = Date.now() - nodeStartTime;
       getLog().info(
         { nodeId: node.id, durationMs: duration },
@@ -1250,7 +1485,7 @@ async function executeNodeInternal(
     lastNodeActivityUpdate.delete(`${workflowRun.id}:${node.id}`);
 
     // If the abort was triggered by user cancel (not idle timeout), classify as cancel
-    if (nodeAbortController.signal.aborted && !nodeIdleTimedOut) {
+    if (nodeAbortController.signal.aborted && !nodeIdleTimedOut && !nodeSafetyViolation) {
       getLog().info({ nodeId: node.id }, 'dag_node_cancelled_via_abort');
       return {
         state: 'failed',
@@ -1872,6 +2107,7 @@ async function executeLoopNode(
     let fullOutput = ''; // raw, for signal detection
     let cleanOutput = ''; // stripped, for platform display
     let iterationIdleTimedOut = false;
+    let iterationToolTimedOut: { toolName: string; elapsedMs: number } | null = null;
     const iterationAbortController = new AbortController();
 
     try {
@@ -1905,15 +2141,35 @@ async function executeLoopNode(
       let lastToolStartedAt: { toolName: string; startedAt: number } | null = null;
 
       const effectiveIdleTimeout = node.idle_timeout ?? STEP_IDLE_TIMEOUT_MS;
+      const effectiveToolTimeout = Math.min(effectiveIdleTimeout, getWorkflowToolCallTimeoutMs());
 
-      for await (const msg of withIdleTimeout(generator, effectiveIdleTimeout, () => {
-        iterationIdleTimedOut = true;
-        getLog().warn(
-          { nodeId: node.id, iteration: i, timeoutMs: effectiveIdleTimeout },
-          'loop_node.idle_timeout_reached'
-        );
-        iterationAbortController.abort();
-      })) {
+      for await (const msg of withProviderTimeouts(
+        generator,
+        effectiveIdleTimeout,
+        effectiveToolTimeout,
+        () => {
+          iterationIdleTimedOut = true;
+          getLog().warn(
+            { nodeId: node.id, iteration: i, timeoutMs: effectiveIdleTimeout },
+            'loop_node.idle_timeout_reached'
+          );
+          iterationAbortController.abort();
+        },
+        (tool, elapsedMs) => {
+          iterationToolTimedOut = { toolName: tool.toolName, elapsedMs };
+          getLog().warn(
+            {
+              nodeId: node.id,
+              iteration: i,
+              toolName: tool.toolName,
+              timeoutMs: effectiveToolTimeout,
+              elapsedMs,
+            },
+            'loop_node.tool_timeout_reached'
+          );
+          iterationAbortController.abort();
+        }
+      )) {
         if (msg.type === 'assistant') {
           fullOutput += msg.content;
           const cleaned = stripCompletionTags(msg.content, loop.until);
@@ -1981,6 +2237,16 @@ async function executeLoopNode(
           break; // Result is the "I'm done" signal — don't wait for subprocess to exit
         } else if (msg.type === 'tool' && msg.toolName) {
           const now = Date.now();
+          const disallowedPath = getDisallowedToolPath(msg.toolName, msg.toolInput, cwd, [
+            artifactsDir,
+            logDir,
+          ]);
+          if (disallowedPath) {
+            iterationAbortController.abort();
+            throw new Error(
+              `Tool '${msg.toolName}' in loop '${node.id}' targeted path outside the workflow working path: ${disallowedPath}`
+            );
+          }
 
           // Emit tool_completed for the previous tool
           if (lastToolStartedAt) {
@@ -2049,6 +2315,13 @@ async function executeLoopNode(
           await platform.sendStructuredEvent(conversationId, msg);
         }
         // rate_limit chunks: already log.warn'd in claude.ts; not surfaced to SSE per design
+      }
+
+      if (iterationToolTimedOut) {
+        const timedOutTool = iterationToolTimedOut as { toolName: string; elapsedMs: number };
+        throw new Error(
+          `Tool '${timedOutTool.toolName}' in loop '${node.id}' timed out after ${String(Math.round(timedOutTool.elapsedMs / 1000))}s without producing a result.`
+        );
       }
     } catch (error) {
       const err = error as Error;
@@ -2543,6 +2816,17 @@ export async function executeDagWorkflow(
   priorCompletedNodes?: Map<string, string>
 ): Promise<string | undefined> {
   const dagStartTime = Date.now();
+  const workflowCwd = workflowRun.working_path ?? cwd;
+  if (workflowRun.working_path && resolvePath(workflowRun.working_path) !== resolvePath(cwd)) {
+    getLog().warn(
+      {
+        workflowRunId: workflowRun.id,
+        requestedCwd: cwd,
+        workingPath: workflowRun.working_path,
+      },
+      'dag.workflow_cwd_overridden_by_working_path'
+    );
+  }
   const workflowLevelOptions = {
     effort: workflow.effort,
     thinking: workflow.thinking,
@@ -2752,7 +3036,7 @@ export async function executeDagWorkflow(
               deps,
               platform,
               conversationId,
-              cwd,
+              workflowCwd,
               workflowRun,
               node,
               artifactsDir,
@@ -2792,7 +3076,7 @@ export async function executeDagWorkflow(
               deps,
               platform,
               conversationId,
-              cwd,
+              workflowCwd,
               workflowRun,
               node,
               loopProvider,
@@ -2819,7 +3103,7 @@ export async function executeDagWorkflow(
               conversationId,
               workflowProvider,
               workflowModel,
-              cwd,
+              workflowCwd,
               artifactsDir,
               logDir,
               baseBranch,
@@ -2871,7 +3155,7 @@ export async function executeDagWorkflow(
               deps,
               platform,
               conversationId,
-              cwd,
+              workflowCwd,
               workflowRun,
               node,
               artifactsDir,
@@ -2898,7 +3182,7 @@ export async function executeDagWorkflow(
             platform,
             conversationId,
             workflowRun.id,
-            cwd,
+            workflowCwd,
             workflowLevelOptions
           );
           const providerMeta = getNodeProviderDisplayMeta(provider, config, model);
@@ -2922,7 +3206,7 @@ export async function executeDagWorkflow(
               deps,
               platform,
               conversationId,
-              cwd,
+              workflowCwd,
               workflowRun,
               node,
               providerMeta,
@@ -2946,9 +3230,13 @@ export async function executeDagWorkflow(
             const isFatal = output.error
               ? classifyError(new Error(output.error)) === 'FATAL'
               : false;
+            const isSafetyError = output.error
+              ? isNonRetryableWorkflowSafetyError(output.error)
+              : false;
             const isTransient = output.error ? isTransientNodeError(output.error) : false;
             const shouldRetry =
               !isFatal &&
+              !isSafetyError &&
               (retryConfig.onError === 'all' ||
                 (retryConfig.onError === 'transient' && isTransient));
 
