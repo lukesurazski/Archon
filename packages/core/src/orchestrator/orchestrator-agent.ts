@@ -286,7 +286,7 @@ async function dispatchOrchestratorWorkflow(
       );
       await platform.sendMessage(
         conversationId,
-        `❌ Cannot rerun **${workflow.name}** while a paused run exists: interactive workflows reuse the conversation's working path, so a forced rerun would conflict with the existing run. Abandon or complete the paused run first, then try again.`
+        `❌ Cannot force-rerun **${workflow.name}** for interactive workflows yet: they reuse the conversation working path and can conflict with existing run state. Complete/abandon the current run or rerun without force-fresh.`
       );
       return;
     }
