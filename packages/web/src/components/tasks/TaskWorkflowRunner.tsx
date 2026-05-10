@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ChevronDown, Loader2, Play } from 'lucide-react';
+import { ChevronDown, Loader2, Play, RotateCcw, Square } from 'lucide-react';
 import {
+  cancelWorkflowRun,
   createConversation,
   deleteConversation,
   listWorkflowRuns,
@@ -27,6 +28,10 @@ function statusClass(status: string): string {
     (status === 'pending' || status === 'paused') && 'bg-warning/15 text-warning',
     status === 'cancelled' && 'bg-surface-secondary text-text-tertiary'
   );
+}
+
+function isActiveRun(status: WorkflowRunResponse['status']): boolean {
+  return status === 'running' || status === 'pending' || status === 'paused';
 }
 
 function formatStartedAt(run: WorkflowRunResponse): string {
@@ -108,6 +113,8 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
   const [workflowPickerOpen, setWorkflowPickerOpen] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [rerunningRunId, setRerunningRunId] = useState<string | null>(null);
+  const [cancellingRunId, setCancellingRunId] = useState<string | null>(null);
   const workflowPickerBlurTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAutoFilledMessage = useRef('');
 
@@ -214,6 +221,66 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
     },
     onError: err => {
       setError(err instanceof Error ? err.message : 'Failed to start workflow');
+    },
+  });
+
+  const rerunMutation = useMutation({
+    mutationFn: async (run: WorkflowRunResponse) => {
+      setRerunningRunId(run.id);
+      let conversationId: string | undefined;
+      let workflowStarted = false;
+      try {
+        ({ conversationId } = await createConversation(
+          task.codebase_id ?? undefined,
+          undefined,
+          task.id
+        ));
+        await runWorkflow(run.workflow_name, conversationId, run.user_message, {
+          forceFresh: true,
+        });
+        workflowStarted = true;
+      } catch (err) {
+        if (conversationId && !workflowStarted) {
+          void deleteConversation(conversationId).catch(cleanupErr => {
+            console.warn('[TaskWorkflowRunner] Failed to clean up orphan rerun conversation', {
+              conversationId,
+              cleanupErr,
+            });
+          });
+        }
+        throw err;
+      }
+    },
+    onSuccess: () => {
+      setError(null);
+      void queryClient.invalidateQueries({ queryKey: ['workflow-runs', { taskId: task.id }] });
+      void queryClient.invalidateQueries({ queryKey: ['task', task.id] });
+      void queryClient.invalidateQueries({ queryKey: ['tasks'] });
+    },
+    onError: err => {
+      setError(err instanceof Error ? err.message : 'Failed to rerun workflow');
+    },
+    onSettled: () => {
+      setRerunningRunId(null);
+    },
+  });
+
+  const cancelMutation = useMutation({
+    mutationFn: async (run: WorkflowRunResponse) => {
+      setCancellingRunId(run.id);
+      await cancelWorkflowRun(run.id);
+    },
+    onSuccess: () => {
+      setError(null);
+      void queryClient.invalidateQueries({ queryKey: ['workflow-runs', { taskId: task.id }] });
+      void queryClient.invalidateQueries({ queryKey: ['task', task.id] });
+      void queryClient.invalidateQueries({ queryKey: ['tasks'] });
+    },
+    onError: err => {
+      setError(err instanceof Error ? err.message : 'Failed to stop workflow');
+    },
+    onSettled: () => {
+      setCancellingRunId(null);
     },
   });
 
@@ -378,21 +445,77 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
         </h3>
         <div className="divide-y divide-border">
           {runs && runs.length > 0 ? (
-            runs.map(run => (
-              <Link
-                key={run.id}
-                to={`/workflows/runs/${run.id}`}
-                className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 py-2 text-sm hover:text-primary"
-              >
-                <span className="truncate text-text-primary">{run.workflow_name}</span>
-                <span
-                  className={cn('rounded-full px-2 py-0.5 text-[10px]', statusClass(run.status))}
+            runs.map(run => {
+              const isCancelling = cancellingRunId === run.id;
+              const isRerunning = rerunningRunId === run.id;
+              return (
+                <div
+                  key={run.id}
+                  className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 py-2 text-sm"
                 >
-                  {run.status}
-                </span>
-                <span className="text-xs text-text-tertiary">{formatStartedAt(run)}</span>
-              </Link>
-            ))
+                  <Link
+                    to={`/workflows/runs/${run.id}`}
+                    className="min-w-0 truncate text-text-primary hover:text-primary"
+                    title={`Open workflow run ${run.id}`}
+                  >
+                    {run.workflow_name}
+                  </Link>
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={cn(
+                        'rounded-full px-2 py-0.5 text-[10px]',
+                        statusClass(run.status)
+                      )}
+                    >
+                      {run.status}
+                    </span>
+                    <span className="hidden min-w-[7rem] text-right text-xs text-text-tertiary sm:inline">
+                      {formatStartedAt(run)}
+                    </span>
+                    <Link
+                      to={`/workflows/runs/${run.id}`}
+                      className="rounded px-2 py-1 text-xs font-medium text-primary hover:bg-primary/10"
+                    >
+                      Graph
+                    </Link>
+                    {isActiveRun(run.status) && (
+                      <button
+                        type="button"
+                        onClick={(): void => {
+                          cancelMutation.mutate(run);
+                        }}
+                        disabled={isCancelling}
+                        className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-text-secondary hover:bg-surface-elevated hover:text-error disabled:cursor-wait disabled:opacity-60"
+                        title={`Stop workflow run ${run.id}`}
+                      >
+                        {isCancelling ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <Square className="h-3 w-3" />
+                        )}
+                        Stop
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={(): void => {
+                        rerunMutation.mutate(run);
+                      }}
+                      disabled={isRerunning}
+                      className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-text-secondary hover:bg-surface-elevated hover:text-primary disabled:cursor-wait disabled:opacity-60"
+                      title={`Run ${run.workflow_name} again with the same input`}
+                    >
+                      {isRerunning ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <RotateCcw className="h-3 w-3" />
+                      )}
+                      Run again
+                    </button>
+                  </div>
+                </div>
+              );
+            })
           ) : (
             <p className="py-3 text-sm text-text-tertiary">No workflows have run for this task.</p>
           )}
