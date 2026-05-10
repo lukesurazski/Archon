@@ -12,6 +12,7 @@ import {
   relative as relativePath,
   resolve as resolvePath,
 } from 'path';
+import { tmpdir } from 'os';
 import { execFileAsync } from '@archon/git';
 import { discoverScriptsForCwd } from './script-discovery';
 import type {
@@ -192,7 +193,9 @@ function collectToolPaths(
   const normalizedToolName = toolName.toLowerCase();
   if (normalizedToolName === 'bash') {
     const command = toolInput.command;
-    return typeof command === 'string' ? extractShellAbsolutePaths(command) : [];
+    return typeof command === 'string' && mayMutateShellPaths(command)
+      ? extractShellAbsolutePaths(command)
+      : [];
   }
   const pathKeysByTool: Record<string, string[]> = {
     read: ['file_path'],
@@ -237,13 +240,28 @@ function extractShellAbsolutePaths(command: string): string[] {
   return paths;
 }
 
+function mayMutateShellPaths(command: string): boolean {
+  const mutatingCommandPattern =
+    /(?:^|[;&|({]\s*)(?:rm|rmdir|mv|cp|mkdir|touch|tee|chmod|chown|install|truncate)\b|(?:^|[;&|({]\s*)sed\s+-i\b|(?:^|[;&|({]\s*)git\s+(?:checkout|reset|clean|merge|rebase|pull|worktree\s+(?:add|remove|prune))\b|(?:^|[^<])>{1,2}\s*\/|\bcat\s+<<|<<-/;
+  return mutatingCommandPattern.test(command);
+}
+
+function getWorkflowTempRoots(): string[] {
+  return ['/tmp', '/private/tmp', tmpdir()];
+}
+
 export function getDisallowedToolPath(
   toolName: string,
   toolInput: Record<string, unknown> | undefined,
   cwd: string,
   allowedRoots: readonly string[] = []
 ): string | null {
-  const roots = [cwd, ...allowedRoots]
+  const normalizedToolName = toolName.toLowerCase();
+  const roots = [
+    cwd,
+    ...allowedRoots,
+    ...(normalizedToolName === 'bash' ? getWorkflowTempRoots() : []),
+  ]
     .filter(root => root.trim() !== '')
     .map(root => resolvePath(root));
   for (const rawPath of collectToolPaths(toolName, toolInput)) {

@@ -2181,8 +2181,20 @@ describe('executeDagWorkflow -- provider tool safety', () => {
       )
     ).toBeNull();
     expect(
-      getDisallowedToolPath('Bash', { command: `cd ${outsideDir} && git status --short` }, testDir)
-    ).toBe(outsideDir);
+      getDisallowedToolPath('Bash', { command: `cat ${join(outsideDir, 'src.ts')}` }, testDir)
+    ).toBeNull();
+    const blockedBashPath = join(dirname(dirname(tmpdir())), 'archon-outside-src.ts');
+    expect(
+      getDisallowedToolPath('Bash', { command: `echo hi > ${blockedBashPath}` }, testDir)
+    ).toBe(blockedBashPath);
+    expect(
+      getDisallowedToolPath(
+        'Bash',
+        { command: `echo scratch > ${join(tmpdir(), 'archon-scratch.txt')}` },
+        testDir,
+        [tmpdir()]
+      )
+    ).toBeNull();
   });
 
   it('fails the workflow when a provider tool targets outside the working path', async () => {
