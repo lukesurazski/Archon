@@ -8,6 +8,16 @@ interface TaskHeaderProps {
   task: TaskDetailResponse;
 }
 
+function formatLastActivity(value: string | null): string {
+  if (!value) return 'No activity yet';
+  return new Date(value.endsWith('Z') ? value : `${value}Z`).toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 export function TaskHeader({ task }: TaskHeaderProps): React.ReactElement {
   const queryClient = useQueryClient();
   const [title, setTitle] = useState(task.title);
@@ -64,6 +74,9 @@ export function TaskHeader({ task }: TaskHeaderProps): React.ReactElement {
               className="mt-2 w-full resize-none bg-transparent text-sm text-text-secondary outline-none placeholder:text-text-tertiary"
               placeholder="Add a short task description..."
             />
+            <p className="mt-1 text-xs text-text-tertiary">
+              Last activity: {formatLastActivity(task.last_activity_at)}
+            </p>
           </div>
           <button
             onClick={(): void => {

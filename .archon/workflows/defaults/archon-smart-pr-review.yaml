@@ -10,6 +10,14 @@ description: |
   Unlike the comprehensive review, this workflow classifies the PR first and only runs
   the review agents that are relevant. A 3-line typo fix skips test-coverage and docs-impact.
 
+inputs:
+  - name: pr
+    type: pull_request
+    label: Pull request
+    description: PR number or GitHub pull request URL to review.
+    placeholder: "123 or https://github.com/owner/repo/pull/123"
+    required: true
+
 nodes:
   - id: scope
     command: archon-pr-review-scope

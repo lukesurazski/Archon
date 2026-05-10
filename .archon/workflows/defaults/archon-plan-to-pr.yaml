@@ -16,6 +16,14 @@ description: |
 
   NOT for: Creating plans from scratch (use archon-idea-to-pr), quick fixes, standalone reviews.
 
+inputs:
+  - name: plan
+    type: path
+    label: Plan file
+    description: Path to the implementation plan to execute.
+    placeholder: "$ARTIFACTS_DIR/plan.md or .agents/plans/my-plan.md"
+    required: true
+
 nodes:
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 1: SETUP

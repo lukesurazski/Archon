@@ -1,18 +1,10 @@
-import { useMemo, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMemo } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router';
-import { ChevronDown, ChevronRight } from 'lucide-react';
-import {
-  createTask,
-  deleteTask,
-  listTasks,
-  listWorkflowRuns,
-  getCodebaseEnvironments,
-  updateTask,
-} from '@/lib/api';
+import { createTask, listTasks, listWorkflowRuns, getCodebaseEnvironments } from '@/lib/api';
 import type { WorkflowRunResponse, IsolationEnvironment } from '@/lib/api';
 import { WorkflowInvoker } from '@/components/sidebar/WorkflowInvoker';
-import { TaskItem } from '@/components/tasks/TaskItem';
+import { TasksView } from '@/components/sidebar/TasksView';
 import { formatDuration } from '@/lib/format';
 import { cn } from '@/lib/utils';
 
@@ -47,7 +39,6 @@ export function ProjectDetail({
 }: ProjectDetailProps): React.ReactElement {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [showArchived, setShowArchived] = useState(false);
 
   const { data: tasks, isError: isErrorTasks } = useQuery({
     queryKey: ['tasks', codebaseId],
@@ -92,41 +83,6 @@ export function ProjectDetail({
     navigate(`/workflows/runs/${run.id}`);
   };
 
-  const archiveMutation = useMutation({
-    mutationFn: (taskId: string) => deleteTask(taskId),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['tasks'] });
-    },
-  });
-
-  const restoreMutation = useMutation({
-    mutationFn: (taskId: string) => updateTask(taskId, { status: 'active' }),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['tasks'] });
-    },
-  });
-
-  // Filter tasks by search
-  const filteredTasks = tasks?.filter(task => {
-    if (!searchQuery) return true;
-    const query = searchQuery.toLowerCase();
-    return (
-      task.title.toLowerCase().includes(query) ||
-      (task.branch_name ?? '').toLowerCase().includes(query) ||
-      (task.pr_url ?? '').toLowerCase().includes(query)
-    );
-  });
-
-  const filteredArchivedTasks = archivedTasks?.filter(task => {
-    if (!searchQuery) return true;
-    const query = searchQuery.toLowerCase();
-    return (
-      task.title.toLowerCase().includes(query) ||
-      (task.branch_name ?? '').toLowerCase().includes(query) ||
-      (task.pr_url ?? '').toLowerCase().includes(query)
-    );
-  });
-
   // Filter and sort runs by search and status
   const sortedRuns = runs
     ?.filter(run => {
@@ -156,71 +112,14 @@ export function ProjectDetail({
 
       <WorkflowInvoker codebaseId={codebaseId} />
 
-      {/* Tasks section */}
-      <div>
-        <span className="px-1 text-[11px] font-semibold uppercase tracking-wider text-text-tertiary">
-          Tasks
-        </span>
-        <div className="mt-1 flex flex-col gap-0.5">
-          {isErrorTasks ? (
-            <span className="px-1 text-xs text-error">Failed to load — retrying</span>
-          ) : filteredTasks && filteredTasks.length > 0 ? (
-            filteredTasks.map(task => (
-              <TaskItem
-                key={task.id}
-                task={task}
-                project={{ id: codebaseId, name: projectName }}
-                onArchive={targetTask => {
-                  archiveMutation.mutate(targetTask.id);
-                }}
-              />
-            ))
-          ) : (
-            <span className="px-1 text-xs text-text-tertiary">No tasks</span>
-          )}
-          {archivedTasks && archivedTasks.length > 0 && (
-            <div className="mt-2 border-t border-border/60 pt-2">
-              <button
-                type="button"
-                onClick={(): void => {
-                  setShowArchived(prev => !prev);
-                }}
-                className="flex w-full items-center justify-between rounded px-1 py-1 text-[11px] font-semibold uppercase tracking-wider text-text-tertiary hover:bg-surface-elevated"
-              >
-                <span>Archived</span>
-                <span className="inline-flex items-center gap-1">
-                  {filteredArchivedTasks?.length ?? 0}
-                  {showArchived ? (
-                    <ChevronDown className="h-3.5 w-3.5" />
-                  ) : (
-                    <ChevronRight className="h-3.5 w-3.5" />
-                  )}
-                </span>
-              </button>
-              {showArchived && (
-                <div className="mt-1 flex flex-col gap-0.5 opacity-80">
-                  {filteredArchivedTasks && filteredArchivedTasks.length > 0 ? (
-                    filteredArchivedTasks.map(task => (
-                      <TaskItem
-                        key={task.id}
-                        task={task}
-                        project={{ id: codebaseId, name: projectName }}
-                        onRestore={targetTask => {
-                          restoreMutation.mutate(targetTask.id);
-                        }}
-                      />
-                    ))
-                  ) : (
-                    <span className="px-1 text-xs text-text-tertiary">
-                      No archived tasks match this search.
-                    </span>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
+      <TasksView
+        tasks={tasks}
+        archivedTasks={archivedTasks}
+        searchQuery={searchQuery}
+        isError={isErrorTasks}
+        getProject={() => ({ id: codebaseId, name: projectName })}
+        compact
+      />
 
       {/* Workflow runs section */}
       <div>

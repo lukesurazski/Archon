@@ -1,22 +1,12 @@
 import { useState, useMemo, useRef, useCallback, useEffect } from 'react';
 import { Link, useParams, useNavigate } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import {
-  Archive,
-  ChevronDown,
-  ChevronLeft,
-  ChevronRight,
-  MessageSquarePlus,
-  Search,
-  Plus,
-  Loader2,
-  FolderGit2,
-} from 'lucide-react';
+import { Archive, ChevronLeft, MessageSquarePlus, Search, Plus, Loader2 } from 'lucide-react';
 import { ChatInterface } from '@/components/chat/ChatInterface';
-import { TaskItem } from '@/components/tasks/TaskItem';
 import { TaskConversationList } from '@/components/tasks/TaskConversationList';
 import { TaskHeader } from '@/components/tasks/TaskHeader';
 import { TaskWorkflowRunner } from '@/components/tasks/TaskWorkflowRunner';
+import { TasksView } from '@/components/sidebar/TasksView';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import { useProject } from '@/contexts/ProjectContext';
@@ -28,7 +18,6 @@ import {
   getCodebaseInput,
   getTask,
   listTasks,
-  updateTask,
 } from '@/lib/api';
 import type { CodebaseResponse } from '@/lib/api';
 
@@ -72,7 +61,6 @@ export function ChatPage(): React.ReactElement {
   const { selectedProjectId, setSelectedProjectId, codebases, isLoadingCodebases } = useProject();
 
   const [searchQuery, setSearchQuery] = useState('');
-  const [showArchived, setShowArchived] = useState(false);
   const [width, setWidth] = useState(getInitialWidth);
   const isResizing = useRef(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -160,34 +148,6 @@ export function ChatPage(): React.ReactElement {
     return map;
   }, [codebases]);
 
-  const filtered = useMemo(
-    () =>
-      tasks?.filter(task => {
-        if (!searchQuery) return true;
-        const query = searchQuery.toLowerCase();
-        return (
-          task.title.toLowerCase().includes(query) ||
-          (task.branch_name ?? '').toLowerCase().includes(query) ||
-          (task.pr_url ?? '').toLowerCase().includes(query)
-        );
-      }),
-    [tasks, searchQuery]
-  );
-
-  const filteredArchived = useMemo(
-    () =>
-      archivedTasks?.filter(task => {
-        if (!searchQuery) return true;
-        const query = searchQuery.toLowerCase();
-        return (
-          task.title.toLowerCase().includes(query) ||
-          (task.branch_name ?? '').toLowerCase().includes(query) ||
-          (task.pr_url ?? '').toLowerCase().includes(query)
-        );
-      }),
-    [archivedTasks, searchQuery]
-  );
-
   const handleNewTask = useCallback((): void => {
     const title = window.prompt('Task title');
     const trimmed = title?.trim();
@@ -221,23 +181,6 @@ export function ChatPage(): React.ReactElement {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['tasks'] });
       navigate('/chat');
-    },
-  });
-
-  const archiveFromListMutation = useMutation({
-    mutationFn: (targetTaskId: string) => deleteTask(targetTaskId),
-    onSuccess: (_result, targetTaskId) => {
-      void queryClient.invalidateQueries({ queryKey: ['tasks'] });
-      void queryClient.invalidateQueries({ queryKey: ['task', targetTaskId] });
-      if (targetTaskId === taskId) navigate('/chat');
-    },
-  });
-
-  const restoreFromListMutation = useMutation({
-    mutationFn: (targetTaskId: string) => updateTask(targetTaskId, { status: 'active' }),
-    onSuccess: (_result, targetTaskId) => {
-      void queryClient.invalidateQueries({ queryKey: ['tasks'] });
-      void queryClient.invalidateQueries({ queryKey: ['task', targetTaskId] });
     },
   });
 
@@ -383,68 +326,15 @@ export function ChatPage(): React.ReactElement {
 
         {/* Task list */}
         <ScrollArea className="flex-1 min-h-0 px-2 pb-2">
-          <div className="flex flex-col gap-0.5">
-            {filtered && filtered.length > 0 ? (
-              filtered.map(task => (
-                <TaskItem
-                  key={task.id}
-                  task={task}
-                  project={task.codebase_id ? codebaseMap.get(task.codebase_id) : undefined}
-                  onArchive={targetTask => {
-                    archiveFromListMutation.mutate(targetTask.id);
-                  }}
-                />
-              ))
-            ) : (
-              <div className="flex flex-col items-center justify-center gap-2 py-8 px-4">
-                <FolderGit2 className="h-8 w-8 text-text-tertiary" />
-                <span className="text-xs text-text-tertiary text-center">
-                  {tasks && tasks.length > 0 ? 'No matching tasks' : 'No tasks yet — create one.'}
-                </span>
-              </div>
-            )}
-            {archivedTasks && archivedTasks.length > 0 && (
-              <div className="mt-3 border-t border-border/60 pt-2">
-                <button
-                  type="button"
-                  onClick={(): void => {
-                    setShowArchived(prev => !prev);
-                  }}
-                  className="flex w-full items-center justify-between rounded px-2 py-1 text-[11px] font-semibold uppercase tracking-wider text-text-tertiary hover:bg-surface-elevated hover:text-text-secondary"
-                >
-                  <span>Archived</span>
-                  <span className="inline-flex items-center gap-1">
-                    {filteredArchived?.length ?? 0}
-                    {showArchived ? (
-                      <ChevronDown className="h-3.5 w-3.5" />
-                    ) : (
-                      <ChevronRight className="h-3.5 w-3.5" />
-                    )}
-                  </span>
-                </button>
-                {showArchived && (
-                  <div className="mt-1 flex flex-col gap-0.5 opacity-80">
-                    {filteredArchived && filteredArchived.length > 0 ? (
-                      filteredArchived.map(task => (
-                        <TaskItem
-                          key={task.id}
-                          task={task}
-                          project={task.codebase_id ? codebaseMap.get(task.codebase_id) : undefined}
-                          onRestore={targetTask => {
-                            restoreFromListMutation.mutate(targetTask.id);
-                          }}
-                        />
-                      ))
-                    ) : (
-                      <span className="px-2 py-2 text-xs text-text-tertiary">
-                        No archived tasks match this search.
-                      </span>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
+          <TasksView
+            tasks={tasks}
+            archivedTasks={archivedTasks}
+            searchQuery={searchQuery}
+            getProject={task => (task.codebase_id ? codebaseMap.get(task.codebase_id) : undefined)}
+            onArchivedTask={archivedTaskId => {
+              if (archivedTaskId === taskId) navigate('/chat');
+            }}
+          />
         </ScrollArea>
 
         {/* Resize handle */}

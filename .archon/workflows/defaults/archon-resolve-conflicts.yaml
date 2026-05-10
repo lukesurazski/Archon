@@ -10,6 +10,14 @@ description: |
   This workflow helps resolve merge conflicts by analyzing the conflicting changes,
   automatically resolving where intent is clear, and presenting options for complex conflicts.
 
+inputs:
+  - name: pr
+    type: pull_request
+    label: Pull request
+    description: PR number or GitHub pull request URL with merge conflicts.
+    placeholder: "123 or https://github.com/owner/repo/pull/123"
+    required: true
+
 nodes:
   - id: resolve
     command: archon-resolve-merge-conflicts

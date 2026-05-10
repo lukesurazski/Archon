@@ -17,6 +17,8 @@ interface TaskWorkflowRunnerProps {
   cwd?: string;
 }
 
+type WorkflowInputMetadata = NonNullable<WorkflowListEntry['workflow']['inputs']>[number];
+
 function statusClass(status: string): string {
   return cn(
     status === 'running' && 'bg-primary/15 text-primary',
@@ -36,6 +38,42 @@ function formatStartedAt(run: WorkflowRunResponse): string {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+function formatInputType(type: WorkflowInputMetadata['type']): string {
+  switch (type) {
+    case 'pull_request':
+      return 'Pull request';
+    case 'branch':
+      return 'Branch';
+    case 'path':
+      return 'Path';
+    case 'issue':
+      return 'Issue';
+    case 'number':
+      return 'Number';
+    case 'text':
+      return 'Text';
+  }
+}
+
+function getInputPlaceholder(input?: WorkflowInputMetadata): string {
+  if (!input) return 'Workflow input / arguments';
+  if (input.placeholder) return input.placeholder;
+  switch (input.type) {
+    case 'pull_request':
+      return 'PR number or URL, e.g. 123 or https://github.com/owner/repo/pull/123';
+    case 'branch':
+      return 'Branch name, e.g. feat/task-container-workspace';
+    case 'path':
+      return 'File or directory path, e.g. .agents/plans/my-plan.md';
+    case 'issue':
+      return 'Issue number or URL, e.g. 456 or https://github.com/owner/repo/issues/456';
+    case 'number':
+      return 'Numeric input';
+    case 'text':
+      return 'Workflow input / arguments';
+  }
 }
 
 export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): React.ReactElement {
@@ -72,9 +110,19 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
     return sortedWorkflows.filter(entry => {
       const name = entry.workflow.name.toLowerCase();
       const source = entry.source.toLowerCase();
-      return name.includes(query) || source.includes(query);
+      const inputText = (entry.workflow.inputs ?? [])
+        .map(input => `${input.name} ${input.type} ${input.label ?? ''}`)
+        .join(' ')
+        .toLowerCase();
+      return name.includes(query) || source.includes(query) || inputText.includes(query);
     });
   }, [sortedWorkflows, workflowSearch]);
+
+  const selectedWorkflowEntry = sortedWorkflows.find(
+    entry => entry.workflow.name === selectedWorkflow
+  );
+  const selectedWorkflowInputs = selectedWorkflowEntry?.workflow.inputs ?? [];
+  const primaryWorkflowInput = selectedWorkflowInputs[0];
 
   function selectWorkflow(entry: WorkflowListEntry): void {
     setSelectedWorkflow(entry.workflow.name);
@@ -207,8 +255,18 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
                       <span className="min-w-0 truncate text-text-primary">
                         {entry.workflow.name}
                       </span>
-                      <span className="shrink-0 rounded bg-surface-secondary px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-tertiary">
-                        {entry.source}
+                      <span className="flex shrink-0 items-center gap-1">
+                        {(entry.workflow.inputs ?? []).slice(0, 2).map(input => (
+                          <span
+                            key={`${entry.workflow.name}:${input.name}`}
+                            className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary"
+                          >
+                            {input.label ?? formatInputType(input.type)}
+                          </span>
+                        ))}
+                        <span className="rounded bg-surface-secondary px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-tertiary">
+                          {entry.source}
+                        </span>
                       </span>
                     </button>
                   ))
@@ -229,7 +287,7 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
                 runMutation.mutate();
               }
             }}
-            placeholder="Workflow input / arguments"
+            placeholder={getInputPlaceholder(primaryWorkflowInput)}
             className="rounded-md border border-border bg-surface-elevated px-3 py-2 text-sm text-text-primary outline-none placeholder:text-text-tertiary focus:border-primary"
           />
           <button
@@ -247,6 +305,25 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
             Run
           </button>
         </div>
+        {selectedWorkflowInputs.length > 0 && (
+          <div className="rounded-md border border-border bg-surface-elevated px-3 py-2">
+            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">
+              Expected Input
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {selectedWorkflowInputs.map(input => (
+                <span
+                  key={input.name}
+                  title={input.description}
+                  className="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary"
+                >
+                  {input.label ?? formatInputType(input.type)}
+                  {input.required ? ' required' : ''}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
         {error && <p className="text-xs text-error">{error}</p>}
       </div>
 

@@ -15,6 +15,16 @@ function statusLabel(status: WorkflowRunStatus | null): string {
   return status[0].toUpperCase() + status.slice(1);
 }
 
+function formatLastActivity(value: string | null): string {
+  if (!value) return 'No activity';
+  return new Date(value.endsWith('Z') ? value : `${value}Z`).toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 export function TaskItem({
   task,
   project,
@@ -69,9 +79,10 @@ export function TaskItem({
         </div>
 
         <div className="flex items-center justify-between gap-2 pl-4">
-          <span className="inline-flex items-center gap-1 text-[10px] text-text-tertiary">
-            <MessageSquare className="h-3 w-3" />
-            {task.conversation_count}
+          <span className="inline-flex min-w-0 items-center gap-1 text-[10px] text-text-tertiary">
+            <MessageSquare className="h-3 w-3 shrink-0" />
+            <span>{task.conversation_count}</span>
+            <span className="truncate">- {formatLastActivity(task.last_activity_at)}</span>
           </span>
           <span
             className={cn(

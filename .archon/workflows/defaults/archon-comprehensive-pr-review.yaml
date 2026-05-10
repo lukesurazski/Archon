@@ -10,6 +10,14 @@ description: |
   This workflow produces artifacts in $ARTIFACTS_DIR/../reviews/pr-{number}/ and posts
   a comprehensive review comment to the GitHub PR.
 
+inputs:
+  - name: pr
+    type: pull_request
+    label: Pull request
+    description: PR number or GitHub pull request URL to review.
+    placeholder: "123 or https://github.com/owner/repo/pull/123"
+    required: true
+
 nodes:
   - id: scope
     command: archon-pr-review-scope

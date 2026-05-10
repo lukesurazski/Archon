@@ -13,6 +13,14 @@ description: |
 provider: claude
 model: opus
 
+inputs:
+  - name: pr
+    type: pull_request
+    label: Pull request
+    description: PR number or GitHub pull request URL to validate.
+    placeholder: "123 or https://github.com/owner/repo/pull/123"
+    required: true
+
 nodes:
   # ═══════════════════════════════════════════════════════════════
   # PHASE 1: SETUP — Fetch PR info and allocate ports

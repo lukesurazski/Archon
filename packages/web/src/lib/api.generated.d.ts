@@ -4,6 +4,246 @@
  */
 
 export interface paths {
+  '/api/tasks': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List task containers */
+    get: {
+      parameters: {
+        query?: {
+          codebaseId?: string;
+          status?: components['schemas']['TaskStatus'];
+          limit?: string;
+        };
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description Task list */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['TaskListResponse'];
+          };
+        };
+        /** @description Server error */
+        500: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+      };
+    };
+    put?: never;
+    /** Create a task container */
+    post: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody: {
+        content: {
+          'application/json': components['schemas']['CreateTaskBody'];
+        };
+      };
+      responses: {
+        /** @description Created task */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Task'];
+          };
+        };
+        /** @description Bad request */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+        /** @description Server error */
+        500: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/tasks/{id}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Get a task with conversations and workflow runs */
+    get: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path: {
+          id: string;
+        };
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description Task detail */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['TaskDetail'];
+          };
+        };
+        /** @description Not found */
+        404: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+        /** @description Server error */
+        500: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+      };
+    };
+    put?: never;
+    post?: never;
+    /** Archive a task container */
+    delete: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path: {
+          id: string;
+        };
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description Archived task */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['SuccessResponse'];
+          };
+        };
+        /** @description Not found */
+        404: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+        /** @description Server error */
+        500: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+      };
+    };
+    options?: never;
+    head?: never;
+    /** Update a task container */
+    patch: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path: {
+          id: string;
+        };
+        cookie?: never;
+      };
+      requestBody: {
+        content: {
+          'application/json': components['schemas']['UpdateTaskBody'];
+        };
+      };
+      responses: {
+        /** @description Updated task */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Task'];
+          };
+        };
+        /** @description Bad request */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+        /** @description Not found */
+        404: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+        /** @description Server error */
+        500: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+      };
+    };
+    trace?: never;
+  };
   '/api/conversations': {
     parameters: {
       query?: never;
@@ -17,6 +257,7 @@ export interface paths {
         query?: {
           platform?: string;
           codebaseId?: string;
+          taskId?: string;
         };
         header?: never;
         path?: never;
@@ -1303,6 +1544,7 @@ export interface paths {
           conversationId?: string;
           status?: string;
           codebaseId?: string;
+          taskId?: string;
           limit?: string;
         };
         header?: never;
@@ -1812,6 +2054,51 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/providers/diagnostics': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List safe AI provider diagnostics */
+    get: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description Provider diagnostics */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['ProviderDiagnosticsListResponse'];
+          };
+        };
+        /** @description Server error */
+        500: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+      };
+    };
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/codebases/{id}/environments': {
     parameters: {
       query?: never;
@@ -1944,11 +2231,50 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
   schemas: {
+    /** @enum {string} */
+    TaskStatus: 'active' | 'archived';
+    Task: {
+      id: string;
+      title: string;
+      description: string | null;
+      codebase_id: string | null;
+      branch_name: string | null;
+      pr_url: string | null;
+      pr_number: number | null;
+      status: components['schemas']['TaskStatus'];
+      created_at: string;
+      updated_at: string;
+      conversation_count: number;
+      /** @enum {string|null} */
+      latest_run_status:
+        | 'pending'
+        | 'running'
+        | 'completed'
+        | 'failed'
+        | 'cancelled'
+        | 'paused'
+        | null;
+      latest_run_started_at: string | null;
+      last_activity_at: string | null;
+    };
+    TaskListResponse: components['schemas']['Task'][];
+    Error: {
+      error: string;
+    };
+    CreateTaskBody: {
+      title: string;
+      description?: string;
+      codebaseId?: string;
+      branchName?: string;
+      prUrl?: string;
+      prNumber?: number;
+    };
     Conversation: {
       id: string;
       platform_type: string;
       platform_conversation_id: string;
       codebase_id: string | null;
+      task_id: string | null;
       cwd: string | null;
       isolation_env_id: string | null;
       ai_assistant_type: string;
@@ -1959,10 +2285,40 @@ export interface components {
       created_at: string;
       updated_at: string;
     };
-    ConversationListResponse: components['schemas']['Conversation'][];
-    Error: {
-      error: string;
+    /** @enum {string} */
+    WorkflowRunStatus: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
+    WorkflowRun: {
+      id: string;
+      workflow_name: string;
+      conversation_id: string;
+      parent_conversation_id: string | null;
+      codebase_id: string | null;
+      status: components['schemas']['WorkflowRunStatus'];
+      user_message: string;
+      metadata: {
+        [key: string]: unknown;
+      };
+      started_at: string;
+      completed_at: string | null;
+      last_activity_at: string | null;
+      working_path: string | null;
     };
+    TaskDetail: components['schemas']['Task'] & {
+      conversations: components['schemas']['Conversation'][];
+      workflow_runs: components['schemas']['WorkflowRun'][];
+    };
+    UpdateTaskBody: {
+      title?: string;
+      description?: string | null;
+      branchName?: string | null;
+      prUrl?: string | null;
+      prNumber?: number | null;
+      status?: components['schemas']['TaskStatus'];
+    };
+    SuccessResponse: {
+      success: boolean;
+    };
+    ConversationListResponse: components['schemas']['Conversation'][];
     CreateConversationResponse: {
       conversationId: string;
       id: string;
@@ -1970,10 +2326,8 @@ export interface components {
     };
     CreateConversationBody: {
       codebaseId?: string;
+      taskId?: string;
       message?: string;
-    };
-    SuccessResponse: {
-      success: boolean;
     };
     UpdateConversationBody: {
       title?: string;
@@ -2348,6 +2702,16 @@ export interface components {
       worktree?: {
         enabled?: boolean;
       };
+      inputs?: {
+        name: string;
+        /** @enum {string} */
+        type: 'text' | 'pull_request' | 'branch' | 'path' | 'issue' | 'number';
+        label?: string;
+        description?: string;
+        placeholder?: string;
+        required?: boolean;
+      }[];
+      mutates_checkout?: boolean;
       tags?: string[];
       nodes: components['schemas']['DagNode'][];
     };
@@ -2370,24 +2734,7 @@ export interface components {
     RunWorkflowBody: {
       conversationId: string;
       message: string;
-    };
-    /** @enum {string} */
-    WorkflowRunStatus: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
-    WorkflowRun: {
-      id: string;
-      workflow_name: string;
-      conversation_id: string;
-      parent_conversation_id: string | null;
-      codebase_id: string | null;
-      status: components['schemas']['WorkflowRunStatus'];
-      user_message: string;
-      metadata: {
-        [key: string]: unknown;
-      };
-      started_at: string;
-      completed_at: string | null;
-      last_activity_at: string | null;
-      working_path: string | null;
+      forceFresh?: boolean;
     };
     DashboardWorkflowRun: components['schemas']['WorkflowRun'] & {
       codebase_name: string | null;
@@ -2525,6 +2872,7 @@ export interface components {
       mcp: boolean;
       hooks: boolean;
       skills: boolean;
+      agents: boolean;
       toolRestrictions: boolean;
       structuredOutput: boolean;
       envInjection: boolean;
@@ -2542,6 +2890,38 @@ export interface components {
     };
     ProviderListResponse: {
       providers: components['schemas']['ProviderInfo'][];
+    };
+    ProviderCredentialSource: {
+      /** @enum {string} */
+      type: 'env' | 'file' | 'login';
+      name: string;
+      present: boolean;
+      active?: boolean;
+      note?: string;
+      displayHint?: string;
+    };
+    ProviderDiagnostics: {
+      id: string;
+      displayName: string;
+      builtIn: boolean;
+      capabilities: components['schemas']['ProviderCapabilities'];
+      credentialStatus: {
+        available: boolean;
+        verified: boolean;
+        mode: string;
+        activeCredentialHint?: string;
+        sources: components['schemas']['ProviderCredentialSource'][];
+        notes: string[];
+      };
+      modelStatus: {
+        configured: string | null;
+        examples: string[];
+        accessVerified: boolean;
+        notes: string[];
+      };
+    };
+    ProviderDiagnosticsListResponse: {
+      providers: components['schemas']['ProviderDiagnostics'][];
     };
     IsolationEnvironment: {
       id: string;
