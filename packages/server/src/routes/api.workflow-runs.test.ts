@@ -688,6 +688,29 @@ describe('GET /api/workflows/runs', () => {
     expect(callArgs?.limit).toBe(50);
   });
 
+  test('filters by taskId query param', async () => {
+    // Guards against a regression that drops the taskId pass-through from
+    // the route handler — without it the task workspace UI would show all
+    // workflow runs across the user's account instead of just the task's.
+    mockListWorkflowRuns.mockImplementationOnce(async () => []);
+
+    const { app } = makeApp();
+    await app.request('/api/workflows/runs?taskId=task-1');
+
+    const [[callArgs]] = mockListWorkflowRuns.mock.calls as [[{ taskId?: string }]][];
+    expect(callArgs?.taskId).toBe('task-1');
+  });
+
+  test('omits taskId when query param is missing', async () => {
+    mockListWorkflowRuns.mockImplementationOnce(async () => []);
+
+    const { app } = makeApp();
+    await app.request('/api/workflows/runs');
+
+    const [[callArgs]] = mockListWorkflowRuns.mock.calls as [[{ taskId?: string }]][];
+    expect(callArgs?.taskId).toBeUndefined();
+  });
+
   test('returns 500 when DB throws', async () => {
     mockListWorkflowRuns.mockImplementationOnce(async () => {
       throw new Error('DB failure');

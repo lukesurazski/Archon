@@ -35,8 +35,23 @@ export const taskDetailSchema = taskSchema
 
 export const listTasksQuerySchema = z.object({
   codebaseId: z.string().optional(),
-  status: taskStatusSchema.optional(),
-  limit: z.string().optional(),
+  // Default at the schema level so the route handler never needs to coerce
+  // and the OpenAPI spec documents the default. Unknown values are rejected
+  // by the enum — no silent coercion to 'active'.
+  status: taskStatusSchema.optional().default('active'),
+  // Query strings arrive as strings. Transform so invalid / out-of-range
+  // values clamp to a safe default rather than 400-ing — this preserves the
+  // hand-rolled behaviour that was here before the Zod migration. (Status
+  // intentionally does NOT clamp — typos there are client bugs.)
+  limit: z
+    .string()
+    .optional()
+    .transform(value => {
+      if (value === undefined || value === '') return 100;
+      const n = Number(value);
+      if (!Number.isFinite(n)) return 100;
+      return Math.min(Math.max(1, Math.floor(n)), 500);
+    }),
 });
 
 export const taskIdParamsSchema = z.object({ id: z.string() });
@@ -44,11 +59,15 @@ export const taskIdParamsSchema = z.object({ id: z.string() });
 export const createTaskBodySchema = z
   .object({
     title: z.string().min(1).max(255),
-    description: z.string().optional(),
-    codebaseId: z.string().optional(),
-    branchName: z.string().optional(),
-    prUrl: z.string().optional(),
-    prNumber: z.number().int().positive().optional(),
+    // Nullable mirrors updateTaskBodySchema and the underlying DB columns,
+    // so a client can POST `{ "description": null }` to create a task with
+    // an explicitly empty field rather than being forced to omit it. The DB
+    // column is nullable; omission and `null` produce the same row.
+    description: z.string().nullable().optional(),
+    codebaseId: z.string().nullable().optional(),
+    branchName: z.string().nullable().optional(),
+    prUrl: z.string().nullable().optional(),
+    prNumber: z.number().int().positive().nullable().optional(),
   })
   .strict()
   .openapi('CreateTaskBody');

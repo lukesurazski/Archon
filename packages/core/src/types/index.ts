@@ -45,11 +45,13 @@ export interface Task {
   pr_url: string | null;
   pr_number: number | null;
   status: 'active' | 'archived';
-  // SQLite returns these as ISO strings via the TEXT column; PG returns
-  // ISO strings through node-postgres for TIMESTAMPTZ unless type parsers
-  // are overridden. Typed as string to match runtime on both backends.
-  created_at: string;
-  updated_at: string;
+  // Date in both backends: node-postgres returns `Date` for TIMESTAMPTZ by
+  // default, and SQLite TEXT rows are coerced via `normalizeTaskSummary` in
+  // `tasks.ts` (mirrors `normalizeWorkflowRun`). Keeping this aligned with
+  // `Conversation`, `Codebase`, `Session` means internal consumers can rely
+  // on Date methods regardless of backend.
+  created_at: Date;
+  updated_at: Date;
 }
 
 import type { IsolationHints } from '@archon/isolation';

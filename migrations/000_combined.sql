@@ -234,6 +234,11 @@ CREATE INDEX IF NOT EXISTS idx_workflow_runs_status
   ON remote_agent_workflow_runs(status);
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_parent_conv
   ON remote_agent_workflow_runs(parent_conversation_id);
+-- Compound indexes used by tasks.ts taskSummarySelect() — see migrations/022_tasks.sql
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_conv_started_at
+  ON remote_agent_workflow_runs(conversation_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_parent_conv_started_at
+  ON remote_agent_workflow_runs(parent_conversation_id, started_at DESC);
 
 -- Partial index for efficient staleness queries on running workflows
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_last_activity

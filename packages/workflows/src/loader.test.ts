@@ -125,6 +125,39 @@ describe('Workflow Loader', () => {
       expect(result.workflows[0].workflow.inputs).toBeUndefined();
     });
 
+    it('should drop inputs when name is empty (.trim().min(1))', async () => {
+      // .trim().min(1) rejects whitespace-only strings. Lock the contract
+      // so a future refactor that drops .trim() before .min(1) is caught.
+      const workflowDir = join(testDir, '.archon', 'workflows');
+      await mkdir(workflowDir, { recursive: true });
+      const yaml = `name: test\ndescription: test\ninputs:\n  - name: ""\n    type: text\nnodes:\n  - id: n\n    prompt: p\n`;
+      await writeFile(join(workflowDir, 'test.yaml'), yaml);
+      const result = await discoverWorkflows(testDir, { loadDefaults: false });
+      expect(result.workflows[0].workflow.inputs).toBeUndefined();
+    });
+
+    it('should drop inputs when label is whitespace-only (.trim().min(1))', async () => {
+      const workflowDir = join(testDir, '.archon', 'workflows');
+      await mkdir(workflowDir, { recursive: true });
+      const yaml = `name: test\ndescription: test\ninputs:\n  - name: pr\n    type: pull_request\n    label: "   "\nnodes:\n  - id: n\n    prompt: p\n`;
+      await writeFile(join(workflowDir, 'test.yaml'), yaml);
+      const result = await discoverWorkflows(testDir, { loadDefaults: false });
+      expect(result.workflows[0].workflow.inputs).toBeUndefined();
+    });
+
+    it('should drop the WHOLE inputs block when one of several items is invalid', async () => {
+      // All-or-nothing: a single invalid entry (bad type) drops the entire
+      // block rather than retaining the valid sibling. This is documented
+      // resilience behaviour — surface it explicitly in tests so callers
+      // notice if the loader contract changes.
+      const workflowDir = join(testDir, '.archon', 'workflows');
+      await mkdir(workflowDir, { recursive: true });
+      const yaml = `name: test\ndescription: test\ninputs:\n  - name: ok\n    type: text\n  - name: bad\n    type: not_a_real_type\nnodes:\n  - id: n\n    prompt: p\n`;
+      await writeFile(join(workflowDir, 'test.yaml'), yaml);
+      const result = await discoverWorkflows(testDir, { loadDefaults: false });
+      expect(result.workflows[0].workflow.inputs).toBeUndefined();
+    });
+
     it('should preserve interactive: false when explicitly set', async () => {
       const workflowDir = join(testDir, '.archon', 'workflows');
       await mkdir(workflowDir, { recursive: true });

@@ -1241,23 +1241,21 @@ export function registerApiRoutes(
     }
   }
 
-  // GET /api/tasks - List task containers
+  // GET /api/tasks - List task containers.
+  // Query validation (status enum, limit coercion + clamp, default values)
+  // is owned by listTasksQuerySchema; the route handler is a thin
+  // pass-through. Unknown statuses produce a 400 from validationErrorHook
+  // automatically — no silent coercion to 'active'.
   registerOpenApiRoute(listTasksRoute, async c => {
     try {
-      const codebaseId = c.req.query('codebaseId') ?? undefined;
-      const rawStatus = c.req.query('status');
-      // Reject unknown status explicitly — silent coercion ('foo' → 'active')
-      // would hide client bugs (e.g. a typo) and contradicts the documented
-      // enum in taskStatusSchema.
-      let status: 'active' | 'archived' = 'active';
-      if (rawStatus !== undefined) {
-        if (rawStatus !== 'active' && rawStatus !== 'archived') {
-          return apiError(c, 400, 'Invalid status', "Expected 'active' or 'archived'");
+      // Pull Zod-validated query from the OpenAPI route registration. The
+      // schema owns coercion, default values, and clamping — see
+      // `listTasksQuerySchema` for the contract.
+      const { codebaseId, status, limit } = (
+        c.req as unknown as {
+          valid(k: 'query'): z.infer<typeof listTasksQuerySchema>;
         }
-        status = rawStatus;
-      }
-      const limitRaw = Number(c.req.query('limit'));
-      const limit = Number.isNaN(limitRaw) ? 100 : Math.min(Math.max(1, limitRaw), 500);
+      ).valid('query');
       const tasks = await taskDb.listTasks({ codebaseId, status, limit });
       return c.json(tasks);
     } catch (error) {

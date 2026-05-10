@@ -22,6 +22,16 @@ const mockSoftDeleteConversation = mock(async (_id: string) => {});
 const mockUpdateConversationTitle = mock(async (_id: string, _title: string) => {});
 
 const mockGenerateAndSetTitle = mock(async () => {});
+const mockListConversations = mock(
+  async (
+    _limit?: number,
+    _platformType?: string,
+    _codebaseId?: string,
+    _excludeHidden?: boolean,
+    _taskId?: string
+  ) => [] as unknown[]
+);
+const mockGetTaskForConv = mock(async (_id: string) => null as unknown);
 mock.module('@archon/core', () => ({
   handleMessage: mock(async () => {}),
   getDatabaseType: () => 'sqlite',
@@ -63,7 +73,7 @@ mock.module('@archon/core/db/conversations', () => ({
   findConversationByPlatformId: mockFindConversationByPlatformId,
   softDeleteConversation: mockSoftDeleteConversation,
   updateConversationTitle: mockUpdateConversationTitle,
-  listConversations: mock(async () => []),
+  listConversations: mockListConversations,
   getOrCreateConversation: mock(async () => ({
     id: 'internal-uuid-123',
     platform_conversation_id: 'web-test-abc',
@@ -88,6 +98,15 @@ mock.module('@archon/core/db/messages', () => ({
 mock.module('@archon/core/db/codebases', () => ({
   listCodebases: mock(async () => [{ default_cwd: '/tmp/project' }]),
   getCodebase: mock(async () => null),
+}));
+
+mock.module('@archon/core/db/tasks', () => ({
+  getTask: mockGetTaskForConv,
+  getTaskDetail: mock(async () => null),
+  listTasks: mock(async () => []),
+  createTask: mock(async () => ({ id: 'task-new' })),
+  updateTask: mock(async () => null),
+  archiveTask: mock(async () => true),
 }));
 
 import { registerApiRoutes } from './api';
@@ -472,5 +491,77 @@ describe('GET /api/conversations/:id — forge platform IDs with encoded slashes
 
     const response = await app.request('/api/conversations/unknown-org%2Funknown-repo%2399');
     expect(response.status).toBe(404);
+  });
+});
+
+// Tests for the taskId wiring on the listConversations route + the
+// createConversation route. Guards against a positional-argument bug in
+// `listConversations(limit, platformType, codebaseId, excludeHidden, taskId)`
+// and the 400-on-missing-task validation on POST.
+describe('GET /api/conversations — taskId filter', () => {
+  test('passes taskId positionally through to listConversations', async () => {
+    mockListConversations.mockClear();
+    mockListConversations.mockImplementationOnce(async () => []);
+
+    const app = new OpenAPIHono({ defaultHook: validationErrorHook });
+    registerApiRoutes(app, {} as WebAdapter, {} as ConversationLockManager);
+    const response = await app.request('/api/conversations?taskId=task-1');
+    expect(response.status).toBe(200);
+    // Positional contract: (limit, platformType, codebaseId, excludeHidden, taskId)
+    expect(mockListConversations).toHaveBeenCalledWith(50, undefined, undefined, true, 'task-1');
+  });
+
+  test('omits taskId when query param is missing', async () => {
+    mockListConversations.mockClear();
+    mockListConversations.mockImplementationOnce(async () => []);
+
+    const app = new OpenAPIHono({ defaultHook: validationErrorHook });
+    registerApiRoutes(app, {} as WebAdapter, {} as ConversationLockManager);
+    await app.request('/api/conversations');
+    const callArgs = mockListConversations.mock.calls[0] as unknown[];
+    expect(callArgs[4]).toBeUndefined();
+  });
+});
+
+describe('POST /api/conversations — taskId validation', () => {
+  const mockWebAdapter = {
+    setConversationDbId: mock(() => {}),
+  } as unknown as WebAdapter;
+
+  test('returns 400 when taskId references a non-existent task', async () => {
+    mockGetTaskForConv.mockImplementationOnce(async () => null);
+
+    const app = new OpenAPIHono({ defaultHook: validationErrorHook });
+    registerApiRoutes(app, mockWebAdapter, {} as ConversationLockManager);
+    const response = await app.request('/api/conversations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ taskId: 'missing-task' }),
+    });
+    expect(response.status).toBe(400);
+  });
+
+  test('creates conversation when taskId references an existing task', async () => {
+    mockGetTaskForConv.mockImplementationOnce(async () => ({
+      id: 'task-1',
+      title: 'Existing',
+      description: null,
+      codebase_id: null,
+      branch_name: null,
+      pr_url: null,
+      pr_number: null,
+      status: 'active',
+      created_at: new Date(),
+      updated_at: new Date(),
+    }));
+
+    const app = new OpenAPIHono({ defaultHook: validationErrorHook });
+    registerApiRoutes(app, mockWebAdapter, {} as ConversationLockManager);
+    const response = await app.request('/api/conversations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ taskId: 'task-1' }),
+    });
+    expect(response.status).toBe(200);
   });
 });

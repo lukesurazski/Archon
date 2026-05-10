@@ -1,4 +1,14 @@
-import { describe, it, expect, beforeEach, afterEach, mock, spyOn, type Mock } from 'bun:test';
+import {
+  describe,
+  it,
+  test,
+  expect,
+  beforeEach,
+  afterEach,
+  mock,
+  spyOn,
+  type Mock,
+} from 'bun:test';
 import { mkdir, writeFile, rm } from 'fs/promises';
 import { dirname, join } from 'path';
 import { tmpdir } from 'os';
@@ -2267,6 +2277,224 @@ describe('executeDagWorkflow -- provider tool safety', () => {
     );
 
     expect(mockSendQueryDag.mock.calls[0][1]).toBe(testDir);
+  });
+
+  it('detects disallowed paths for Write, MultiEdit, NotebookEdit, Grep, Glob, LS', () => {
+    const outside = join(outsideDir, 'x');
+    // Each tool has its own path-key shape; a typo in any one (e.g.
+    // `notebookedit` → `notebook_edit`) would silently disable the safety
+    // guard for that tool. This test pins all 6 file-touching, non-Edit/Bash
+    // tools at once so a single regression surfaces here.
+    expect(getDisallowedToolPath('Write', { file_path: outside }, testDir)).toBe(outside);
+    expect(getDisallowedToolPath('MultiEdit', { file_path: outside }, testDir)).toBe(outside);
+    expect(getDisallowedToolPath('NotebookEdit', { notebook_path: outside }, testDir)).toBe(
+      outside
+    );
+    expect(getDisallowedToolPath('Grep', { path: outside }, testDir)).toBe(outside);
+    expect(getDisallowedToolPath('Glob', { path: outside }, testDir)).toBe(outside);
+    expect(getDisallowedToolPath('LS', { path: outside }, testDir)).toBe(outside);
+  });
+
+  it('handles array-of-path inputs (Glob with multiple roots)', () => {
+    const outside = join(outsideDir, 'a');
+    // If any element of the array is disallowed, the guard must catch it.
+    expect(getDisallowedToolPath('Glob', { path: [outside, testDir] }, testDir)).toBe(outside);
+    // Array with all-allowed paths must pass.
+    expect(
+      getDisallowedToolPath('Glob', { path: [join(testDir, 'a'), join(testDir, 'b')] }, testDir)
+    ).toBeNull();
+  });
+
+  it('ignores tools without a registered path key', () => {
+    // Tools we deliberately don't sandbox (e.g. Task, WebFetch) must not be
+    // accidentally restricted by future refactors that expand the table.
+    expect(getDisallowedToolPath('Task', { file_path: join(outsideDir, 'x') }, testDir)).toBeNull();
+    expect(getDisallowedToolPath('WebFetch', { url: 'https://example.com' }, testDir)).toBeNull();
+  });
+
+  describe('mayMutateShellPaths regex coverage', () => {
+    // The shell-mutation regex is hand-written and covers ~10 command
+    // families. The original test set covered only `echo > path` and `find`;
+    // these table-driven cases pin one positive per command family plus a
+    // few negative cases to lock both kinds of regressions (false negatives
+    // = sandbox bypass, false positives = legitimate workflow blocked).
+    const blocked = join(dirname(dirname(tmpdir())), 'archon-mutate-target.txt');
+    const cases: Array<[string, string, boolean]> = [
+      ['rm', `rm ${blocked}`, true],
+      ['rmdir', `rmdir ${blocked}`, true],
+      ['mv', `mv foo ${blocked}`, true],
+      ['cp', `cp foo ${blocked}`, true],
+      ['mkdir', `mkdir -p ${blocked}`, true],
+      ['touch', `touch ${blocked}`, true],
+      ['chmod', `chmod 755 ${blocked}`, true],
+      ['sed -i', `sed -i 's/a/b/' ${blocked}`, true],
+      ['git checkout', `git checkout main -- ${blocked}`, true],
+      ['git reset', `git reset --hard ${blocked}`, true],
+      ['git worktree add', `git worktree add ${blocked} main`, true],
+      ['heredoc redirect', `cat <<EOF > ${blocked}\nfoo\nEOF`, true],
+      ['chained ;', `cd /tmp; rm ${blocked}`, true],
+      ['chained &&', `cd /tmp && rm ${blocked}`, true],
+      ['ls is read-only', `ls ${blocked}`, false],
+      ['cat is read-only', `cat ${blocked}`, false],
+    ];
+    test.each(cases)('command "%s" → blocked=%s', (_label, command, shouldBlock) => {
+      const result = getDisallowedToolPath('Bash', { command }, testDir);
+      if (shouldBlock) {
+        expect(result).toBe(blocked);
+      } else {
+        expect(result).toBeNull();
+      }
+    });
+  });
+
+  it('does NOT retry safety violations even when retry.onError = all', async () => {
+    // Safety errors carry a structured `nonRetryable: true` flag in
+    // NodeOutput (set by the WorkflowNonRetryableError class). This guard
+    // is load-bearing: combined with `retry.onError: 'all'`, a missing
+    // suppression would loop the same out-of-bounds tool call up to
+    // max_retries times, burning provider budget and producing nothing.
+    const mockStore = createMockStore();
+    const mockDeps = createMockDeps(mockStore);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('dag-safety-no-retry-run');
+
+    mockSendQueryDag.mockImplementation(function* () {
+      yield {
+        type: 'tool',
+        toolName: 'Edit',
+        toolInput: { file_path: join(outsideDir, 'x.ts') },
+      };
+    });
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag-safety-no-retry',
+      testDir,
+      {
+        name: 'safety-no-retry',
+        nodes: [node('my-cmd', undefined, { retry: { on_error: 'all', max_attempts: 5 } })],
+      },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    // Despite retry.onError: 'all' + maxRetries: 5, the safety error must
+    // short-circuit retries — sendQuery is called exactly once.
+    expect(mockSendQueryDag).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails a loop iteration when a provider tool targets outside the working path', async () => {
+    // Loop nodes duplicate the path-safety check from the DAG path. This
+    // test asserts the duplicate is wired correctly — a regression here
+    // would let agents inside loop nodes (the common iterative coding
+    // shape, e.g. archon-execute) bypass the sandbox while DAG nodes
+    // remained correctly guarded.
+    const mockStore = createMockStore();
+    const mockDeps = createMockDeps(mockStore);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('loop-safety-run');
+
+    mockSendQueryDag.mockImplementation(function* () {
+      yield {
+        type: 'tool',
+        toolName: 'Edit',
+        toolInput: { file_path: join(outsideDir, 'src.ts') },
+      };
+    });
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-loop-safety',
+      testDir,
+      {
+        name: 'loop-safety',
+        nodes: [
+          {
+            id: 'loop-node',
+            loop: { prompt: 'do stuff', until: 'DONE', max_iterations: 1 },
+          },
+        ],
+      },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    const failureEvents = (mockStore.createWorkflowEvent as ReturnType<typeof mock>).mock.calls
+      .map((call: unknown[]) => call[0] as { event_type: string; data?: { error?: string } })
+      .filter(
+        event => event.event_type === 'loop_iteration_failed' || event.event_type === 'node_failed'
+      );
+    expect(failureEvents.some(event => event.data?.error?.includes("in loop 'loop-node'"))).toBe(
+      true
+    );
+  });
+
+  it('fails a loop iteration when the active tool exceeds the tool timeout', async () => {
+    process.env.ARCHON_WORKFLOW_TOOL_CALL_TIMEOUT_MS = '25';
+    const mockStore = createMockStore();
+    const mockDeps = createMockDeps(mockStore);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('loop-tool-timeout-run');
+
+    mockSendQueryDag.mockImplementation(async function* () {
+      yield {
+        type: 'tool',
+        toolName: 'Edit',
+        toolInput: { file_path: join(testDir, 'src.ts') },
+      };
+      await new Promise<void>(() => {});
+    });
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-loop-tool-timeout',
+      testDir,
+      {
+        name: 'loop-tool-timeout',
+        nodes: [
+          {
+            id: 'loop-node',
+            loop: { prompt: 'do stuff', until: 'DONE', max_iterations: 1 },
+          },
+        ],
+      },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    const failureEvents = (mockStore.createWorkflowEvent as ReturnType<typeof mock>).mock.calls
+      .map((call: unknown[]) => call[0] as { event_type: string; data?: { error?: string } })
+      .filter(
+        event => event.event_type === 'loop_iteration_failed' || event.event_type === 'node_failed'
+      );
+    expect(
+      failureEvents.some(
+        event =>
+          event.data?.error?.includes("in loop 'loop-node'") &&
+          event.data.error.includes('timed out')
+      )
+    ).toBe(true);
   });
 
   it('fails the workflow when an active provider tool exceeds the tool timeout', async () => {

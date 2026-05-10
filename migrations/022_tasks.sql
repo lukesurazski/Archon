@@ -1,4 +1,11 @@
 -- Introduce tasks as a first-class organizational container for web conversations.
+--
+-- BACKFILL: The DO $$ block below creates one task per pre-existing visible
+-- conversation. This migration must run exactly once (via the migration
+-- tracker). It is intentionally NOT included in `migrations/000_combined.sql`
+-- (the fresh-install schema) because new databases have no rows to backfill.
+-- The SQLite equivalent in `packages/core/src/db/adapters/sqlite.ts` gates the
+-- same backfill on `PRAGMA user_version` for identical idempotency.
 
 CREATE TABLE IF NOT EXISTS remote_agent_tasks (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -24,6 +31,16 @@ CREATE INDEX IF NOT EXISTS idx_tasks_status
 
 CREATE INDEX IF NOT EXISTS idx_conversations_task_id
   ON remote_agent_conversations(task_id);
+
+-- Compound indexes on workflow_runs to support the latest-run-per-task
+-- subqueries in `taskSummarySelect()`: filter by (parent_)conversation_id,
+-- then ORDER BY started_at DESC LIMIT 1. Without these, the planner falls
+-- back to seq scan + sort for every task on every listTasks call.
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_conv_started_at
+  ON remote_agent_workflow_runs(conversation_id, started_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_parent_conv_started_at
+  ON remote_agent_workflow_runs(parent_conversation_id, started_at DESC);
 
 -- Backfill one task per visible conversation so no existing chat is orphaned.
 DO $$

@@ -215,7 +215,7 @@ Archon includes a web dashboard for chatting with your coding agent, running wor
 Register a project by clicking **+** next to "Project" in the chat sidebar - enter a GitHub URL or local path. Then start a conversation, invoke workflows, and watch progress in real time.
 
 **Key pages:**
-- **Chat** - Conversation interface with real-time streaming and tool call visualization
+- **Tasks** - Group conversations and workflow runs under a unit of work (branch + PR); the default landing page with real-time streaming and tool call visualization
 - **Dashboard** - Mission Control for monitoring running workflows, with filterable history by project, status, and date
 - **Workflow Builder** - Visual drag-and-drop editor for creating DAG workflows with loop nodes
 - **Workflow Execution** - Step-by-step progress view for any running or completed workflow

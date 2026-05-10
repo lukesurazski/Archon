@@ -186,10 +186,16 @@ export class SqliteAdapter implements IDatabase {
     }
 
     // Tasks table + one-time conversation backfill.
+    //
     // Gated on PRAGMA user_version so the backfill runs ONCE per database, not
     // on every server start — otherwise every Slack/Telegram/CLI conversation
-    // (which is created without an explicit task_id) would be re-backfilled on
-    // each restart, polluting the task list.
+    // (which is created without an explicit task_id) would get a fresh task
+    // row on each restart, producing duplicate tasks proportional to restart
+    // count.
+    //
+    // user_version is set to 22 to match the corresponding PG migration number
+    // (migrations/022_tasks.sql). Future SQLite-only migration steps should
+    // pick the next unused integer, monotonically increasing.
     //
     // Required for the tasks feature; failures here are FATAL (not warn-only) —
     // a missing remote_agent_tasks table breaks every /api/tasks route and
@@ -197,7 +203,7 @@ export class SqliteAdapter implements IDatabase {
     const userVersionRow = this.db.prepare('PRAGMA user_version').get() as {
       user_version: number;
     };
-    if (userVersionRow.user_version < 1) {
+    if (userVersionRow.user_version < 22) {
       try {
         this.db.run(`
           CREATE TABLE IF NOT EXISTS remote_agent_tasks (
@@ -255,7 +261,7 @@ export class SqliteAdapter implements IDatabase {
         });
         backfill(unassignedConversations);
 
-        this.db.run('PRAGMA user_version = 1');
+        this.db.run('PRAGMA user_version = 22');
       } catch (e: unknown) {
         const err = e as Error;
         getLog().error(
@@ -350,14 +356,22 @@ export class SqliteAdapter implements IDatabase {
         updated_at TEXT DEFAULT (datetime('now'))
       );
 
-      -- Conversations table
+      -- Conversations table.
+      -- task_id is intentionally declared WITHOUT a foreign key here so that
+      -- the fresh-install DDL matches the ALTER TABLE path in migrateColumns()
+      -- (SQLite ALTER TABLE cannot add a column with a REFERENCES clause).
+      -- SQLite enforces FKs only when PRAGMA foreign_keys=ON is set per
+      -- connection; orphaned task_ids are tolerated at the DB level. The
+      -- cascade-on-delete semantics described in docs/reference/database.md
+      -- are enforced by application logic (taskDb.archiveTask) rather than
+      -- the schema.
       CREATE TABLE IF NOT EXISTS remote_agent_conversations (
         id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
         platform_type TEXT NOT NULL,
         platform_conversation_id TEXT NOT NULL,
         ai_assistant_type TEXT DEFAULT 'claude',
         codebase_id TEXT REFERENCES remote_agent_codebases(id) ON DELETE SET NULL,
-        task_id TEXT REFERENCES remote_agent_tasks(id) ON DELETE SET NULL,
+        task_id TEXT,
         cwd TEXT,
         isolation_env_id TEXT,
         title TEXT,
@@ -456,6 +470,13 @@ export class SqliteAdapter implements IDatabase {
       CREATE INDEX IF NOT EXISTS idx_isolation_workflow ON remote_agent_isolation_environments(workflow_type, workflow_id);
       CREATE INDEX IF NOT EXISTS idx_workflow_runs_conversation ON remote_agent_workflow_runs(conversation_id);
       CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON remote_agent_workflow_runs(status);
+      -- Compound indexes for taskSummarySelect()'s latest-run-per-task
+      -- ORDER BY started_at DESC LIMIT 1 subqueries. Without these the
+      -- planner falls back to seq scan + sort on every listTasks call.
+      CREATE INDEX IF NOT EXISTS idx_workflow_runs_conv_started_at
+        ON remote_agent_workflow_runs(conversation_id, started_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_workflow_runs_parent_conv_started_at
+        ON remote_agent_workflow_runs(parent_conversation_id, started_at DESC);
       CREATE INDEX IF NOT EXISTS idx_workflow_events_run_id ON remote_agent_workflow_events(workflow_run_id);
       CREATE INDEX IF NOT EXISTS idx_workflow_events_type ON remote_agent_workflow_events(event_type);
       CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON remote_agent_messages(conversation_id, created_at ASC);

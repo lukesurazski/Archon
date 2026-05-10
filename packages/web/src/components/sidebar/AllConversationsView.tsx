@@ -1,9 +1,9 @@
-import { useNavigate } from 'react-router';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { createTask, listTasks } from '@/lib/api';
+import { useQuery } from '@tanstack/react-query';
+import { listTasks } from '@/lib/api';
 import type { CodebaseResponse } from '@/lib/api';
 import { TasksView } from '@/components/sidebar/TasksView';
 import { useProject } from '@/contexts/ProjectContext';
+import { useCreateTaskFlow } from '@/hooks/useCreateTaskFlow';
 
 interface AllConversationsViewProps {
   searchQuery: string;
@@ -12,9 +12,8 @@ interface AllConversationsViewProps {
 export function AllConversationsView({
   searchQuery,
 }: AllConversationsViewProps): React.ReactElement {
-  const navigate = useNavigate();
-  const queryClient = useQueryClient();
   const { codebases } = useProject();
+  const createTaskFlow = useCreateTaskFlow();
 
   const { data: tasks, isError: isErrorTasks } = useQuery({
     queryKey: ['tasks'],
@@ -36,12 +35,8 @@ export function AllConversationsView({
   }
 
   const handleNewTask = (): void => {
-    const title = window.prompt('Task title');
-    const trimmed = title?.trim();
-    if (!trimmed) return;
-    void createTask({ title: trimmed }).then(task => {
-      void queryClient.invalidateQueries({ queryKey: ['tasks'] });
-      navigate(`/chat/tasks/${encodeURIComponent(task.id)}`);
+    createTaskFlow().catch((err: unknown) => {
+      console.warn('[AllConversationsView] createTask failed', err);
     });
   };
 
