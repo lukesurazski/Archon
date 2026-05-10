@@ -501,7 +501,7 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
                       >
                         Graph
                       </Link>
-                      {isActiveRun(run.status) && (
+                      {isActiveRun(run.status) ? (
                         <button
                           type="button"
                           onClick={(): void => {
@@ -518,23 +518,24 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
                           )}
                           Stop
                         </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={(): void => {
+                            rerunMutation.mutate(run);
+                          }}
+                          disabled={isRerunning}
+                          className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-border bg-surface px-3 text-xs font-medium text-text-secondary hover:border-primary/50 hover:bg-primary/10 hover:text-primary disabled:cursor-wait disabled:opacity-60"
+                          title={`Run ${run.workflow_name} again with the same input`}
+                        >
+                          {isRerunning ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <RotateCcw className="h-3.5 w-3.5" />
+                          )}
+                          Run again
+                        </button>
                       )}
-                      <button
-                        type="button"
-                        onClick={(): void => {
-                          rerunMutation.mutate(run);
-                        }}
-                        disabled={isRerunning}
-                        className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-border bg-surface px-3 text-xs font-medium text-text-secondary hover:border-primary/50 hover:bg-primary/10 hover:text-primary disabled:cursor-wait disabled:opacity-60"
-                        title={`Run ${run.workflow_name} again with the same input`}
-                      >
-                        {isRerunning ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <RotateCcw className="h-3.5 w-3.5" />
-                        )}
-                        Run again
-                      </button>
                     </div>
                   </div>
                 );
