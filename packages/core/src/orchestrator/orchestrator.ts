@@ -273,9 +273,19 @@ export async function dispatchBackgroundWorkflow(
 
   // 2. Create worker conversation in DB
   const workerConv = await db.getOrCreateConversation('web', workerPlatformId);
+  const parentConversation = await db
+    .getConversationById(ctx.conversationDbId)
+    .catch((e: unknown) => {
+      getLog().warn(
+        { err: toError(e), parentConversationId: ctx.conversationDbId },
+        'orchestrator.parent_conversation_lookup_failed'
+      );
+      return null;
+    });
   await db.updateConversation(workerConv.id, {
     cwd: ctx.cwd,
     codebase_id: ctx.codebaseId ?? null,
+    task_id: parentConversation?.task_id ?? null,
     hidden: true,
   });
 

@@ -16,15 +16,19 @@ mock.module('@archon/paths', () => ({
 
 // DB mocks
 const mockUpdateConversation = mock(() => Promise.resolve());
+const mockGetOrCreateConversation = mock(() => Promise.resolve(null));
+const mockGetConversationById = mock(() => Promise.resolve(null));
 mock.module('../db/conversations', () => ({
-  getOrCreateConversation: mock(() => Promise.resolve(null)),
+  getConversationById: mockGetConversationById,
+  getOrCreateConversation: mockGetOrCreateConversation,
   getConversationByPlatformId: mock(() => Promise.resolve(null)),
   updateConversation: mockUpdateConversation,
   touchConversation: mock(() => Promise.resolve()),
 }));
 
+const mockGetCodebase = mock(() => Promise.resolve(null));
 mock.module('../db/codebases', () => ({
-  getCodebase: mock(() => Promise.resolve(null)),
+  getCodebase: mockGetCodebase,
   listCodebases: mock(() => Promise.resolve([])),
   createCodebase: mock(() => Promise.resolve({ id: 'new-codebase-id' })),
 }));
@@ -55,9 +59,12 @@ mock.module('@archon/providers', () => ({
   getAgentProvider: mock(() => null),
 }));
 
+const mockCreateWorkflowRun = mock(() => Promise.resolve({ id: 'run-1' }));
 mock.module('../workflows/store-adapter', () => ({
   createWorkflowDeps: mock(() => ({
-    store: {},
+    store: {
+      createWorkflowRun: mockCreateWorkflowRun,
+    },
     getAgentProvider: () => ({}),
     loadConfig: async () => ({}),
   })),
@@ -114,7 +121,9 @@ mock.module('@archon/workflows/workflow-discovery', () => ({
   discoverWorkflowsWithConfig: mock(() => Promise.resolve({ workflows: [], errors: [] })),
 }));
 mock.module('@archon/workflows/executor', () => ({
-  executeWorkflow: mock(() => Promise.resolve()),
+  executeWorkflow: mock(() =>
+    Promise.resolve({ success: true, summary: null, workflowRunId: 'run-1' })
+  ),
 }));
 mock.module('@archon/workflows/router', () => ({
   findWorkflow: mock(() => undefined),
@@ -133,7 +142,7 @@ mock.module('../services/title-generator', () => ({
 
 // ─── Import module under test AFTER all mocks ────────────────────────────────
 
-const { validateAndResolveIsolation } = await import('./orchestrator');
+const { dispatchBackgroundWorkflow, validateAndResolveIsolation } = await import('./orchestrator');
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
 
@@ -165,6 +174,7 @@ function makeConversation(overrides?: Partial<Conversation>): Conversation {
     ai_assistant_type: 'claude',
     title: null,
     hidden: false,
+    task_id: null,
     deleted_at: null,
     created_at: new Date(),
     updated_at: new Date(),
@@ -230,5 +240,50 @@ describe('validateAndResolveIsolation', () => {
       'Cleaned up 3 merged worktree(s) to make room.'
     );
     expect(result.status).toBe('new');
+  });
+});
+
+describe('dispatchBackgroundWorkflow', () => {
+  let platform: MockPlatformAdapter;
+
+  beforeEach(() => {
+    platform = new MockPlatformAdapter();
+    mockGetOrCreateConversation.mockClear();
+    mockGetConversationById.mockClear();
+    mockUpdateConversation.mockClear();
+    mockGetCodebase.mockClear();
+    mockCreateWorkflowRun.mockClear();
+
+    mockGetOrCreateConversation.mockResolvedValue(makeConversation({ id: 'worker-conv-1' }));
+    mockGetConversationById.mockResolvedValue(
+      makeConversation({ id: 'parent-conv-1', task_id: 'task-1' })
+    );
+    mockCreateWorkflowRun.mockResolvedValue({ id: 'run-1' });
+  });
+
+  test('keeps worker conversations scoped to the parent task', async () => {
+    await dispatchBackgroundWorkflow(
+      {
+        platform,
+        conversationId: 'parent-platform-conv',
+        conversationDbId: 'parent-conv-1',
+        cwd: '/workspace',
+        codebaseId: null,
+        originalMessage: 'review this PR',
+      },
+      {
+        name: 'archon-smart-pr-review',
+        description: 'Review a PR',
+        steps: [],
+      }
+    );
+
+    expect(mockGetConversationById).toHaveBeenCalledWith('parent-conv-1');
+    expect(mockUpdateConversation).toHaveBeenCalledWith('worker-conv-1', {
+      cwd: '/workspace',
+      codebase_id: null,
+      task_id: 'task-1',
+      hidden: true,
+    });
   });
 });
