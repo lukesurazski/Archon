@@ -826,6 +826,7 @@ export async function listWorkflowRuns(options?: {
   status?: WorkflowRunStatus | WorkflowRunStatus[];
   limit?: number;
   codebaseId?: string;
+  taskId?: string;
 }): Promise<WorkflowRun[]> {
   const whereClauses: string[] = [];
   const values: unknown[] = [];
@@ -847,6 +848,13 @@ export async function listWorkflowRuns(options?: {
     values.push(options.codebaseId);
     whereClauses.push(
       `conversation_id IN (SELECT id FROM remote_agent_conversations WHERE codebase_id = $${String(values.length)})`
+    );
+  }
+  if (options?.taskId) {
+    values.push(options.taskId);
+    const taskParam = `$${String(values.length)}`;
+    whereClauses.push(
+      `(conversation_id IN (SELECT id FROM remote_agent_conversations WHERE task_id = ${taskParam}) OR parent_conversation_id IN (SELECT id FROM remote_agent_conversations WHERE task_id = ${taskParam}))`
     );
   }
 

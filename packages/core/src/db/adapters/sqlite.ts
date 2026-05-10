@@ -178,8 +178,72 @@ export class SqliteAdapter implements IDatabase {
       if (!colNames.has('hidden')) {
         this.db.run('ALTER TABLE remote_agent_conversations ADD COLUMN hidden INTEGER DEFAULT 0');
       }
+      if (!colNames.has('task_id')) {
+        this.db.run('ALTER TABLE remote_agent_conversations ADD COLUMN task_id TEXT');
+      }
     } catch (e: unknown) {
       getLog().warn({ err: e as Error }, 'db.sqlite_migration_conversations_columns_failed');
+    }
+
+    // Tasks table + one-time conversation backfill.
+    try {
+      this.db.run(`
+        CREATE TABLE IF NOT EXISTS remote_agent_tasks (
+          id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+          title TEXT NOT NULL,
+          description TEXT,
+          codebase_id TEXT REFERENCES remote_agent_codebases(id) ON DELETE SET NULL,
+          branch_name TEXT,
+          pr_url TEXT,
+          pr_number INTEGER,
+          status TEXT NOT NULL DEFAULT 'active',
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_tasks_codebase ON remote_agent_tasks(codebase_id);
+        CREATE INDEX IF NOT EXISTS idx_tasks_status ON remote_agent_tasks(status);
+        CREATE INDEX IF NOT EXISTS idx_conversations_task_id ON remote_agent_conversations(task_id);
+      `);
+
+      const unassignedConversations = this.db
+        .prepare(
+          `SELECT id, title, platform_conversation_id, codebase_id, created_at, updated_at, last_activity_at
+           FROM remote_agent_conversations
+           WHERE deleted_at IS NULL AND task_id IS NULL`
+        )
+        .all() as {
+        id: string;
+        title: string | null;
+        platform_conversation_id: string;
+        codebase_id: string | null;
+        created_at: string | null;
+        updated_at: string | null;
+        last_activity_at: string | null;
+      }[];
+
+      const insertTask = this.db.prepare(
+        `INSERT INTO remote_agent_tasks (title, codebase_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?)
+         RETURNING id`
+      );
+      const updateConversation = this.db.prepare(
+        'UPDATE remote_agent_conversations SET task_id = ? WHERE id = ?'
+      );
+
+      const backfill = this.db.transaction((rows: typeof unassignedConversations) => {
+        for (const row of rows) {
+          const title = row.title ?? `Task - ${row.platform_conversation_id.slice(0, 12)}`;
+          const createdAt = row.created_at ?? new Date().toISOString();
+          const updatedAt = row.updated_at ?? row.last_activity_at ?? createdAt;
+          const task = insertTask.get(title, row.codebase_id, createdAt, updatedAt) as {
+            id: string;
+          };
+          updateConversation.run(task.id, row.id);
+        }
+      });
+      backfill(unassignedConversations);
+    } catch (e: unknown) {
+      getLog().warn({ err: e as Error }, 'db.sqlite_migration_tasks_failed');
     }
 
     // Workflow runs columns
@@ -252,6 +316,20 @@ export class SqliteAdapter implements IDatabase {
         UNIQUE(codebase_id, key)
       );
 
+      -- Tasks table
+      CREATE TABLE IF NOT EXISTS remote_agent_tasks (
+        id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+        title TEXT NOT NULL,
+        description TEXT,
+        codebase_id TEXT REFERENCES remote_agent_codebases(id) ON DELETE SET NULL,
+        branch_name TEXT,
+        pr_url TEXT,
+        pr_number INTEGER,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+
       -- Conversations table
       CREATE TABLE IF NOT EXISTS remote_agent_conversations (
         id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
@@ -259,6 +337,7 @@ export class SqliteAdapter implements IDatabase {
         platform_conversation_id TEXT NOT NULL,
         ai_assistant_type TEXT DEFAULT 'claude',
         codebase_id TEXT REFERENCES remote_agent_codebases(id) ON DELETE SET NULL,
+        task_id TEXT REFERENCES remote_agent_tasks(id) ON DELETE SET NULL,
         cwd TEXT,
         isolation_env_id TEXT,
         title TEXT,
@@ -348,6 +427,8 @@ export class SqliteAdapter implements IDatabase {
 
       -- Indexes
       CREATE INDEX IF NOT EXISTS idx_codebase_env_vars_codebase_id ON remote_agent_codebase_env_vars(codebase_id);
+      CREATE INDEX IF NOT EXISTS idx_tasks_codebase ON remote_agent_tasks(codebase_id);
+      CREATE INDEX IF NOT EXISTS idx_tasks_status ON remote_agent_tasks(status);
       CREATE INDEX IF NOT EXISTS idx_conversations_platform ON remote_agent_conversations(platform_type, platform_conversation_id);
       CREATE INDEX IF NOT EXISTS idx_sessions_conversation ON remote_agent_sessions(conversation_id);
       CREATE INDEX IF NOT EXISTS idx_sessions_active ON remote_agent_sessions(active);

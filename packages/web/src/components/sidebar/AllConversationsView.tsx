@@ -1,9 +1,10 @@
-import { useMemo } from 'react';
+import { useState } from 'react';
 import { useNavigate } from 'react-router';
-import { useQuery } from '@tanstack/react-query';
-import { listConversations, listWorkflowRuns } from '@/lib/api';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { ChevronDown, ChevronRight } from 'lucide-react';
+import { createTask, deleteTask, listTasks, updateTask } from '@/lib/api';
 import type { CodebaseResponse } from '@/lib/api';
-import { ConversationItem } from '@/components/conversations/ConversationItem';
+import { TaskItem } from '@/components/tasks/TaskItem';
 import { useProject } from '@/contexts/ProjectContext';
 
 interface AllConversationsViewProps {
@@ -14,35 +15,21 @@ export function AllConversationsView({
   searchQuery,
 }: AllConversationsViewProps): React.ReactElement {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { codebases } = useProject();
+  const [showArchived, setShowArchived] = useState(false);
 
-  const { data: conversations, isError: isErrorConversations } = useQuery({
-    queryKey: ['conversations'],
-    queryFn: () => listConversations(),
+  const { data: tasks, isError: isErrorTasks } = useQuery({
+    queryKey: ['tasks'],
+    queryFn: () => listTasks(),
     refetchInterval: 10_000,
   });
 
-  const { data: runs, isError: isErrorRuns } = useQuery({
-    queryKey: ['workflow-runs-status'],
-    queryFn: () => listWorkflowRuns({ limit: 50 }),
-    refetchInterval: 10_000,
+  const { data: archivedTasks } = useQuery({
+    queryKey: ['tasks', 'archived'],
+    queryFn: () => listTasks({ status: 'archived', limit: 100 }),
+    refetchInterval: 30_000,
   });
-
-  const conversationStatusMap = useMemo((): Map<string, 'running' | 'failed'> => {
-    const map = new Map<string, 'running' | 'failed'>();
-    if (!runs || isErrorRuns) return map; // skip silently on error — status badges are secondary UI
-    for (const run of runs) {
-      // For web runs, parent_conversation_id is the visible conversation in the sidebar.
-      // For CLI runs, conversation_id is the only conversation (no parent/worker split).
-      const key = run.parent_conversation_id ?? run.conversation_id;
-      if (run.status === 'running') {
-        map.set(key, 'running');
-      } else if (run.status === 'failed' && !map.has(key)) {
-        map.set(key, 'failed');
-      }
-    }
-    return map;
-  }, [runs, isErrorRuns]);
 
   const codebaseMap = new Map<string, CodebaseResponse>();
   if (codebases) {
@@ -51,47 +38,122 @@ export function AllConversationsView({
     }
   }
 
-  const handleNewChat = (): void => {
-    navigate('/chat');
+  const handleNewTask = (): void => {
+    const title = window.prompt('Task title');
+    const trimmed = title?.trim();
+    if (!trimmed) return;
+    void createTask({ title: trimmed }).then(task => {
+      void queryClient.invalidateQueries({ queryKey: ['tasks'] });
+      navigate(`/chat/tasks/${encodeURIComponent(task.id)}`);
+    });
   };
 
-  const filtered = conversations?.filter(conv => {
+  const filtered = tasks?.filter(task => {
     if (!searchQuery) return true;
     const query = searchQuery.toLowerCase();
-    return (conv.title ?? conv.platform_conversation_id).toLowerCase().includes(query);
+    return (
+      task.title.toLowerCase().includes(query) ||
+      (task.branch_name ?? '').toLowerCase().includes(query) ||
+      (task.pr_url ?? '').toLowerCase().includes(query)
+    );
+  });
+
+  const filteredArchived = archivedTasks?.filter(task => {
+    if (!searchQuery) return true;
+    const query = searchQuery.toLowerCase();
+    return (
+      task.title.toLowerCase().includes(query) ||
+      (task.branch_name ?? '').toLowerCase().includes(query) ||
+      (task.pr_url ?? '').toLowerCase().includes(query)
+    );
+  });
+
+  const archiveMutation = useMutation({
+    mutationFn: (taskId: string) => deleteTask(taskId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['tasks'] });
+    },
+  });
+
+  const restoreMutation = useMutation({
+    mutationFn: (taskId: string) => updateTask(taskId, { status: 'active' }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['tasks'] });
+    },
   });
 
   return (
     <div className="flex flex-col gap-3">
       <button
-        onClick={handleNewChat}
+        onClick={handleNewTask}
         className="mx-1 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-accent-hover transition-colors"
       >
-        New Chat
+        New Task
       </button>
 
       <div>
         <span className="px-1 text-[11px] font-semibold uppercase tracking-wider text-text-tertiary">
-          All Conversations
+          Tasks
         </span>
         <div className="mt-1 flex flex-col gap-0.5">
-          {isErrorConversations ? (
+          {isErrorTasks ? (
             <span className="px-1 text-xs text-error">Failed to load — retrying</span>
           ) : filtered && filtered.length > 0 ? (
-            filtered.map(conv => (
-              <ConversationItem
-                key={conv.id}
-                conversation={conv}
-                projectName={conv.codebase_id ? codebaseMap.get(conv.codebase_id)?.name : undefined}
-                status={conversationStatusMap.get(conv.id) ?? 'idle'}
+            filtered.map(task => (
+              <TaskItem
+                key={task.id}
+                task={task}
+                project={task.codebase_id ? codebaseMap.get(task.codebase_id) : undefined}
+                onArchive={targetTask => {
+                  archiveMutation.mutate(targetTask.id);
+                }}
               />
             ))
           ) : (
             <span className="px-1 text-xs text-text-tertiary">
-              {conversations && conversations.length > 0
-                ? 'No matching conversations'
-                : 'No conversations yet — start a new chat!'}
+              {tasks && tasks.length > 0 ? 'No matching tasks' : 'No tasks yet — create one.'}
             </span>
+          )}
+          {archivedTasks && archivedTasks.length > 0 && (
+            <div className="mt-2 border-t border-border/60 pt-2">
+              <button
+                type="button"
+                onClick={(): void => {
+                  setShowArchived(prev => !prev);
+                }}
+                className="flex w-full items-center justify-between rounded px-1 py-1 text-[11px] font-semibold uppercase tracking-wider text-text-tertiary hover:bg-surface-elevated"
+              >
+                <span>Archived</span>
+                <span className="inline-flex items-center gap-1">
+                  {filteredArchived?.length ?? 0}
+                  {showArchived ? (
+                    <ChevronDown className="h-3.5 w-3.5" />
+                  ) : (
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  )}
+                </span>
+              </button>
+              {showArchived && (
+                <div className="mt-1 flex flex-col gap-0.5 opacity-80">
+                  {filteredArchived && filteredArchived.length > 0 ? (
+                    filteredArchived.map(task => (
+                      <TaskItem
+                        key={task.id}
+                        task={task}
+                        project={task.codebase_id ? codebaseMap.get(task.codebase_id) : undefined}
+                        onRestore={targetTask => {
+                          restoreMutation.mutate(targetTask.id);
+                        }}
+                      />
+                    ))
+                  ) : (
+                    <span className="px-1 text-xs text-text-tertiary">
+                      No archived tasks match this search.
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
           )}
         </div>
       </div>

@@ -7,9 +7,13 @@ import { useProject } from '@/contexts/ProjectContext';
 
 interface WorkflowInvokerProps {
   codebaseId?: string;
+  taskId?: string;
 }
 
-export function WorkflowInvoker({ codebaseId }: WorkflowInvokerProps): React.ReactElement | null {
+export function WorkflowInvoker({
+  codebaseId,
+  taskId,
+}: WorkflowInvokerProps): React.ReactElement | null {
   const navigate = useNavigate();
   const { codebases } = useProject();
   const [selectedWorkflow, setSelectedWorkflow] = useState<string | null>(null);
@@ -38,7 +42,7 @@ export function WorkflowInvoker({ codebaseId }: WorkflowInvokerProps): React.Rea
     let conversationId: string | undefined;
     let workflowStarted = false;
     try {
-      ({ conversationId } = await createConversation(codebaseId ?? undefined));
+      ({ conversationId } = await createConversation(codebaseId ?? undefined, undefined, taskId));
       await runWorkflow(selectedWorkflow, conversationId, message.trim());
       workflowStarted = true;
       setSelectedWorkflow(null);

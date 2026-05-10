@@ -69,6 +69,7 @@ import * as isolationEnvDb from '@archon/core/db/isolation-environments';
 import * as workflowDb from '@archon/core/db/workflows';
 import * as workflowEventDb from '@archon/core/db/workflow-events';
 import * as messageDb from '@archon/core/db/messages';
+import * as taskDb from '@archon/core/db/tasks';
 import { errorSchema } from './schemas/common.schemas';
 import { updateCheckResponseSchema } from './schemas/system.schemas';
 import {
@@ -104,6 +105,15 @@ import {
   listMessagesQuerySchema,
   dispatchResponseSchema,
 } from './schemas/conversation.schemas';
+import {
+  createTaskBodySchema,
+  listTasksQuerySchema,
+  taskDetailSchema,
+  taskIdParamsSchema,
+  taskListResponseSchema,
+  taskSchema,
+  updateTaskBodySchema,
+} from './schemas/task.schemas';
 import {
   codebaseListResponseSchema,
   codebaseSchema,
@@ -280,6 +290,91 @@ const getCommandsRoute = createRoute({
 // =========================================================================
 // Conversation route configs
 // =========================================================================
+
+const listTasksRoute = createRoute({
+  method: 'get',
+  path: '/api/tasks',
+  tags: ['Tasks'],
+  summary: 'List task containers',
+  request: { query: listTasksQuerySchema },
+  responses: {
+    200: {
+      content: { 'application/json': { schema: taskListResponseSchema } },
+      description: 'Task list',
+    },
+    500: jsonError('Server error'),
+  },
+});
+
+const createTaskRoute = createRoute({
+  method: 'post',
+  path: '/api/tasks',
+  tags: ['Tasks'],
+  summary: 'Create a task container',
+  request: {
+    body: { content: { 'application/json': { schema: createTaskBodySchema } }, required: true },
+  },
+  responses: {
+    200: {
+      content: { 'application/json': { schema: taskSchema } },
+      description: 'Created task',
+    },
+    400: jsonError('Bad request'),
+    500: jsonError('Server error'),
+  },
+});
+
+const getTaskRoute = createRoute({
+  method: 'get',
+  path: '/api/tasks/{id}',
+  tags: ['Tasks'],
+  summary: 'Get a task with conversations and workflow runs',
+  request: { params: taskIdParamsSchema },
+  responses: {
+    200: {
+      content: { 'application/json': { schema: taskDetailSchema } },
+      description: 'Task detail',
+    },
+    404: jsonError('Not found'),
+    500: jsonError('Server error'),
+  },
+});
+
+const updateTaskRoute = createRoute({
+  method: 'patch',
+  path: '/api/tasks/{id}',
+  tags: ['Tasks'],
+  summary: 'Update a task container',
+  request: {
+    params: taskIdParamsSchema,
+    body: { content: { 'application/json': { schema: updateTaskBodySchema } }, required: true },
+  },
+  responses: {
+    200: {
+      content: { 'application/json': { schema: taskSchema } },
+      description: 'Updated task',
+    },
+    400: jsonError('Bad request'),
+    404: jsonError('Not found'),
+    500: jsonError('Server error'),
+  },
+});
+
+const deleteTaskRoute = createRoute({
+  method: 'delete',
+  path: '/api/tasks/{id}',
+  tags: ['Tasks'],
+  summary: 'Archive a task container',
+  request: { params: taskIdParamsSchema },
+  responses: {
+    200: {
+      content: { 'application/json': { schema: successResponseSchema } },
+      description: 'Archived task',
+    },
+    404: jsonError('Not found'),
+    500: jsonError('Server error'),
+  },
+});
 
 const getConversationsRoute = createRoute({
   method: 'get',
@@ -1146,16 +1241,92 @@ export function registerApiRoutes(
     }
   }
 
+  // GET /api/tasks - List task containers
+  registerOpenApiRoute(listTasksRoute, async c => {
+    try {
+      const codebaseId = c.req.query('codebaseId') ?? undefined;
+      const rawStatus = c.req.query('status');
+      const status = rawStatus === 'archived' ? 'archived' : 'active';
+      const limitRaw = Number(c.req.query('limit'));
+      const limit = Number.isNaN(limitRaw) ? 100 : Math.min(Math.max(1, limitRaw), 500);
+      const tasks = await taskDb.listTasks({ codebaseId, status, limit });
+      return c.json(tasks);
+    } catch (error) {
+      getLog().error({ err: error }, 'list_tasks_failed');
+      return apiError(c, 500, 'Failed to list tasks');
+    }
+  });
+
+  // POST /api/tasks - Create a task container
+  registerOpenApiRoute(createTaskRoute, async c => {
+    try {
+      const body = getValidatedBody(c, createTaskBodySchema);
+      if (body.codebaseId) {
+        const codebase = await codebaseDb.getCodebase(body.codebaseId);
+        if (!codebase) {
+          return apiError(c, 400, 'Codebase not found', `No codebase with id "${body.codebaseId}"`);
+        }
+      }
+      const task = await taskDb.createTask(body);
+      return c.json(task);
+    } catch (error) {
+      getLog().error({ err: error }, 'create_task_failed');
+      return apiError(c, 500, 'Failed to create task');
+    }
+  });
+
+  // GET /api/tasks/:id - Get task detail
+  registerOpenApiRoute(getTaskRoute, async c => {
+    const taskId = c.req.param('id') ?? '';
+    try {
+      const task = await taskDb.getTaskDetail(taskId);
+      if (!task) return apiError(c, 404, 'Task not found');
+      return c.json(task);
+    } catch (error) {
+      getLog().error({ err: error, taskId }, 'get_task_failed');
+      return apiError(c, 500, 'Failed to get task');
+    }
+  });
+
+  // PATCH /api/tasks/:id - Update task fields
+  registerOpenApiRoute(updateTaskRoute, async c => {
+    const taskId = c.req.param('id') ?? '';
+    try {
+      const body = getValidatedBody(c, updateTaskBodySchema);
+      const task = await taskDb.updateTask(taskId, body);
+      if (!task) return apiError(c, 404, 'Task not found');
+      return c.json(task);
+    } catch (error) {
+      getLog().error({ err: error, taskId }, 'update_task_failed');
+      return apiError(c, 500, 'Failed to update task');
+    }
+  });
+
+  // DELETE /api/tasks/:id - Archive task
+  registerOpenApiRoute(deleteTaskRoute, async c => {
+    const taskId = c.req.param('id') ?? '';
+    try {
+      const archived = await taskDb.archiveTask(taskId);
+      if (!archived) return apiError(c, 404, 'Task not found');
+      return c.json({ success: true });
+    } catch (error) {
+      getLog().error({ err: error, taskId }, 'delete_task_failed');
+      return apiError(c, 500, 'Failed to archive task');
+    }
+  });
+
   // GET /api/conversations - List conversations
   registerOpenApiRoute(getConversationsRoute, async c => {
     try {
       const platformType = c.req.query('platform') ?? undefined;
       const codebaseId = c.req.query('codebaseId') ?? undefined;
+      const taskId = c.req.query('taskId') ?? undefined;
       const conversations = await conversationDb.listConversations(
         50,
         platformType,
         codebaseId,
-        true
+        true,
+        taskId
       );
       return c.json(conversations);
     } catch (error) {
@@ -1183,7 +1354,7 @@ export function registerApiRoutes(
   // Accepts optional `message` field for atomic create+send (avoids ghost "Untitled" entries)
   registerOpenApiRoute(createConversationRoute, async c => {
     try {
-      const { codebaseId, message } = getValidatedBody(c, createConversationBodySchema);
+      const { codebaseId, taskId, message } = getValidatedBody(c, createConversationBodySchema);
 
       // Validate codebase exists if provided
       if (codebaseId) {
@@ -1192,13 +1363,21 @@ export function registerApiRoutes(
           return apiError(c, 400, 'Codebase not found', `No codebase with id "${codebaseId}"`);
         }
       }
+      if (taskId) {
+        const task = await taskDb.getTask(taskId);
+        if (!task) {
+          return apiError(c, 400, 'Task not found', `No task with id "${taskId}"`);
+        }
+      }
 
       const conversationId = `web-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
       const conversation = await conversationDb.getOrCreateConversation(
         'web',
         conversationId,
-        codebaseId
+        codebaseId,
+        undefined,
+        taskId
       );
       webAdapter.setConversationDbId(conversation.platform_conversation_id, conversation.id);
 
@@ -2134,6 +2313,7 @@ export function registerApiRoutes(
           ? (rawStatus as WorkflowRunStatus)
           : undefined;
       const codebaseId = c.req.query('codebaseId') ?? undefined;
+      const taskId = c.req.query('taskId') ?? undefined;
       const limitRaw = Number(c.req.query('limit'));
       const limit = Number.isNaN(limitRaw) ? 50 : Math.min(Math.max(1, limitRaw), 200);
 
@@ -2142,6 +2322,7 @@ export function registerApiRoutes(
         status,
         limit,
         codebaseId,
+        taskId,
       });
       return c.json({ runs });
     } catch (error) {

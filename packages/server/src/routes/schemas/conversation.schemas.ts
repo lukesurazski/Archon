@@ -10,6 +10,7 @@ export const conversationSchema = z
     platform_type: z.string(),
     platform_conversation_id: z.string(),
     codebase_id: z.string().nullable(),
+    task_id: z.string().nullable(),
     cwd: z.string().nullable(),
     isolation_env_id: z.string().nullable(),
     ai_assistant_type: z.string(),
@@ -26,6 +27,7 @@ export const conversationSchema = z
 export const listConversationsQuerySchema = z.object({
   platform: z.string().optional(),
   codebaseId: z.string().optional(),
+  taskId: z.string().optional(),
 });
 
 /** GET /api/conversations response. */
@@ -40,6 +42,7 @@ export const conversationIdParamsSchema = z.object({ id: z.string() });
 export const createConversationBodySchema = z
   .object({
     codebaseId: z.string().optional(),
+    taskId: z.string().optional(),
     message: z.string().optional(),
   })
   .strict()

@@ -228,5 +228,6 @@ export const workflowRunsQuerySchema = z.object({
   // z.string() — handler validates the enum value and ignores invalid values
   status: z.string().optional(),
   codebaseId: z.string().optional(),
+  taskId: z.string().optional(),
   limit: z.string().optional(),
 });
