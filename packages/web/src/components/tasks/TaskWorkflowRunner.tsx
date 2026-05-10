@@ -443,81 +443,107 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
         <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-tertiary">
           Workflow History
         </h3>
-        <div className="divide-y divide-border">
+        <div className="overflow-hidden rounded-lg border border-border bg-surface-elevated/30">
           {runs && runs.length > 0 ? (
-            runs.map(run => {
-              const isCancelling = cancellingRunId === run.id;
-              const isRerunning = rerunningRunId === run.id;
-              return (
-                <div
-                  key={run.id}
-                  className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 py-2 text-sm"
-                >
-                  <Link
-                    to={`/workflows/runs/${run.id}`}
-                    className="min-w-0 truncate text-text-primary hover:text-primary"
-                    title={`Open workflow run ${run.id}`}
+            <div className="divide-y divide-border/70">
+              {runs.map(run => {
+                const isCancelling = cancellingRunId === run.id;
+                const isRerunning = rerunningRunId === run.id;
+                return (
+                  <div
+                    key={run.id}
+                    className={cn(
+                      'grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 px-4 py-3 transition-colors hover:bg-surface-secondary/25',
+                      isActiveRun(run.status) && 'bg-primary/5'
+                    )}
                   >
-                    {run.workflow_name}
-                  </Link>
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={cn(
-                        'rounded-full px-2 py-0.5 text-[10px]',
-                        statusClass(run.status)
+                    <div className="flex min-w-0 items-center gap-3">
+                      <span
+                        className={cn(
+                          'h-2.5 w-2.5 shrink-0 rounded-full',
+                          run.status === 'running' &&
+                            'bg-primary shadow-[0_0_0_4px_rgba(59,130,246,0.12)]',
+                          run.status === 'completed' && 'bg-success',
+                          run.status === 'failed' && 'bg-destructive',
+                          (run.status === 'pending' || run.status === 'paused') && 'bg-warning',
+                          run.status === 'cancelled' && 'bg-text-tertiary'
+                        )}
+                      />
+                      <div className="min-w-0">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <Link
+                            to={`/workflows/runs/${run.id}`}
+                            className="truncate text-sm font-semibold leading-5 text-text-primary hover:text-primary"
+                            title={`Open workflow run ${run.id}`}
+                          >
+                            {run.workflow_name}
+                          </Link>
+                          <span
+                            className={cn(
+                              'shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide',
+                              statusClass(run.status)
+                            )}
+                          >
+                            {run.status}
+                          </span>
+                        </div>
+                        <div className="mt-0.5 flex items-center gap-2 text-[11px] text-text-tertiary">
+                          <span className="font-mono">{run.id.slice(0, 8)}</span>
+                          <span aria-hidden="true">·</span>
+                          <span className="tabular-nums">{formatStartedAt(run)}</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 items-center justify-end gap-1.5">
+                      <Link
+                        to={`/workflows/runs/${run.id}`}
+                        className="inline-flex h-8 items-center justify-center rounded-md border border-border bg-surface px-3 text-xs font-medium text-primary hover:border-primary/50 hover:bg-primary/10"
+                      >
+                        Graph
+                      </Link>
+                      {isActiveRun(run.status) && (
+                        <button
+                          type="button"
+                          onClick={(): void => {
+                            cancelMutation.mutate(run);
+                          }}
+                          disabled={isCancelling}
+                          className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-border bg-surface px-3 text-xs font-medium text-text-secondary hover:border-error/40 hover:bg-error/10 hover:text-error disabled:cursor-wait disabled:opacity-60"
+                          title={`Stop workflow run ${run.id}`}
+                        >
+                          {isCancelling ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Square className="h-3.5 w-3.5" />
+                          )}
+                          Stop
+                        </button>
                       )}
-                    >
-                      {run.status}
-                    </span>
-                    <span className="hidden min-w-[7rem] text-right text-xs text-text-tertiary sm:inline">
-                      {formatStartedAt(run)}
-                    </span>
-                    <Link
-                      to={`/workflows/runs/${run.id}`}
-                      className="rounded px-2 py-1 text-xs font-medium text-primary hover:bg-primary/10"
-                    >
-                      Graph
-                    </Link>
-                    {isActiveRun(run.status) && (
                       <button
                         type="button"
                         onClick={(): void => {
-                          cancelMutation.mutate(run);
+                          rerunMutation.mutate(run);
                         }}
-                        disabled={isCancelling}
-                        className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-text-secondary hover:bg-surface-elevated hover:text-error disabled:cursor-wait disabled:opacity-60"
-                        title={`Stop workflow run ${run.id}`}
+                        disabled={isRerunning}
+                        className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-border bg-surface px-3 text-xs font-medium text-text-secondary hover:border-primary/50 hover:bg-primary/10 hover:text-primary disabled:cursor-wait disabled:opacity-60"
+                        title={`Run ${run.workflow_name} again with the same input`}
                       >
-                        {isCancelling ? (
-                          <Loader2 className="h-3 w-3 animate-spin" />
+                        {isRerunning ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
                         ) : (
-                          <Square className="h-3 w-3" />
+                          <RotateCcw className="h-3.5 w-3.5" />
                         )}
-                        Stop
+                        Run again
                       </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={(): void => {
-                        rerunMutation.mutate(run);
-                      }}
-                      disabled={isRerunning}
-                      className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-text-secondary hover:bg-surface-elevated hover:text-primary disabled:cursor-wait disabled:opacity-60"
-                      title={`Run ${run.workflow_name} again with the same input`}
-                    >
-                      {isRerunning ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      ) : (
-                        <RotateCcw className="h-3 w-3" />
-                      )}
-                      Run again
-                    </button>
+                    </div>
                   </div>
-                </div>
-              );
-            })
+                );
+              })}
+            </div>
           ) : (
-            <p className="py-3 text-sm text-text-tertiary">No workflows have run for this task.</p>
+            <p className="px-3 py-4 text-sm text-text-tertiary">
+              No workflows have run for this task.
+            </p>
           )}
         </div>
       </div>
