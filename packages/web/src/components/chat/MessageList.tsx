@@ -128,18 +128,20 @@ function WorkflowResultCard({
     staleTime: Infinity,
   });
 
-  // Merge: prefer live state when available
+  // Merge: prefer the terminal REST record (immutable) over the in-memory live state.
+  // Once `restRun` exists it is the source of truth; missing data must NOT fall back to
+  // a successful 'completed' status, otherwise a fetch error renders as a successful run.
   const restRun = runData?.run;
   const restEvents = runData?.events ?? [];
-  const status = liveState?.status ?? restRun?.status ?? 'completed';
+  const status = restRun?.status ?? liveState?.status;
   const dagNodes = liveState?.dagNodes ?? [];
   const storeArtifacts = liveState?.artifacts ?? [];
-  const startedAt =
-    liveState?.startedAt ??
-    (restRun?.started_at ? new Date(ensureUtc(restRun.started_at)).getTime() : null);
-  const completedAt =
-    liveState?.completedAt ??
-    (restRun?.completed_at ? new Date(ensureUtc(restRun.completed_at)).getTime() : null);
+  const startedAt = restRun?.started_at
+    ? new Date(ensureUtc(restRun.started_at)).getTime()
+    : (liveState?.startedAt ?? null);
+  const completedAt = restRun?.completed_at
+    ? new Date(ensureUtc(restRun.completed_at)).getTime()
+    : (liveState?.completedAt ?? null);
   const duration = startedAt != null && completedAt != null ? completedAt - startedAt : null;
 
   // Node counts: prefer live dagNodes (exact), fall back to events (approximation —
@@ -183,14 +185,17 @@ function WorkflowResultCard({
   // If API fetch failed and no live state, show degraded card with just content + link
   const fetchFailed = (isError || (!liveState && runData !== undefined && !restRun)) && !liveState;
 
-  // Status-aware header title
+  // Status-aware header title. Only render "complete" when status is definitively
+  // 'completed' — undefined/unknown statuses must not be misrepresented as success.
   let headerTitle: string;
   if (status === 'failed') {
     headerTitle = 'Workflow failed';
   } else if (status === 'cancelled') {
     headerTitle = 'Workflow cancelled';
-  } else {
+  } else if (status === 'completed') {
     headerTitle = 'Workflow complete';
+  } else {
+    headerTitle = 'Workflow status unknown';
   }
 
   // Expand/collapse for text content
@@ -207,7 +212,7 @@ function WorkflowResultCard({
       <div className="rounded-lg border border-border bg-surface overflow-hidden max-w-3xl">
         <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-surface-elevated">
           <span className="shrink-0">
-            <StatusIcon status={fetchFailed ? 'completed' : status} />
+            <StatusIcon status={fetchFailed ? 'unknown' : (status ?? 'unknown')} />
           </span>
           <span className="text-xs font-medium text-text-primary truncate flex-1">
             {headerTitle}: {workflowName}

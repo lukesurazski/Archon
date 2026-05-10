@@ -18,13 +18,12 @@ import { selectInitialNode } from '@/lib/select-initial-node';
 import type {
   WorkflowState,
   ArtifactType,
-  WorkflowRunStatus,
   DagNodeState,
   WorkflowStepStatus,
   LoopIterationInfo,
 } from '@/lib/types';
 
-import type { DagNode, WorkflowEventResponse } from '@/lib/api';
+import type { DagNode, WorkflowEventResponse, WorkflowRunStatus } from '@/lib/api';
 
 /** Tool call event extracted from workflow_events for display in WorkflowLogs. */
 export interface ToolEvent {

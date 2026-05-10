@@ -53,6 +53,10 @@ export function ChatPage(): React.ReactElement {
   const [addError, setAddError] = useState<string | null>(null);
   const [rerunningWorkflowRunId, setRerunningWorkflowRunId] = useState<string | null>(null);
   const [rerunError, setRerunError] = useState<string | null>(null);
+  // Synchronous guard against double-rerun on rapid clicks. State updates are batched
+  // and won't reflect until the next render, so a closure check on rerunningWorkflowRunId
+  // can race; the ref flips immediately so the second click bails out.
+  const rerunningRef = useRef(false);
   const addInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -157,7 +161,8 @@ export function ChatPage(): React.ReactElement {
       run: { id: string; workflowName: string; userMessage: string; codebaseId: string | null },
       _conversation: ConversationResponse
     ): void => {
-      if (rerunningWorkflowRunId) return;
+      if (rerunningRef.current) return;
+      rerunningRef.current = true;
 
       setRerunningWorkflowRunId(run.id);
       setRerunError(null);
@@ -190,10 +195,11 @@ export function ChatPage(): React.ReactElement {
           }
         })
         .finally(() => {
+          rerunningRef.current = false;
           setRerunningWorkflowRunId(null);
         });
     },
-    [navigate, queryClient, rerunningWorkflowRunId]
+    [navigate, queryClient]
   );
 
   const handleAddSubmit = useCallback((): void => {
@@ -347,7 +353,10 @@ export function ChatPage(): React.ReactElement {
           <div className="flex flex-col gap-0.5">
             {filtered && filtered.length > 0 ? (
               filtered.map(conv => {
-                const latestRun = latestWorkflowRunMap.get(conv.id);
+                // latestWorkflowRunMap is keyed by parent_conversation_id ?? conversation_id
+                // (workflow run conversation IDs), which corresponds to the conversation's
+                // platform_conversation_id, NOT the internal `id`.
+                const latestRun = latestWorkflowRunMap.get(conv.platform_conversation_id);
                 return (
                   <ConversationItem
                     key={conv.id}

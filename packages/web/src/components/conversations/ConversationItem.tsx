@@ -2,8 +2,7 @@ import { useState, useRef, useCallback } from 'react';
 import { NavLink, useNavigate, useParams } from 'react-router';
 import { ArrowRight, Loader2, Pencil, RotateCcw, Trash2 } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
-import type { ConversationResponse } from '@/lib/api';
-import type { WorkflowRunStatus } from '@/lib/types';
+import type { ConversationResponse, WorkflowRunStatus } from '@/lib/api';
 import { deleteConversation, updateConversation } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import {

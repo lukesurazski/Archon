@@ -3,11 +3,11 @@
  * Uses relative URLs - Vite proxy handles routing in dev.
  * SSE streams bypass the proxy in dev mode (Vite proxy buffers SSE responses).
  */
-import type { WorkflowRunStatus } from '@/lib/types';
 import type { components } from '@/lib/api.generated';
 
 export type WorkflowDefinition = components['schemas']['WorkflowDefinition'];
 export type DagNode = components['schemas']['DagNode'];
+export type WorkflowRunStatus = components['schemas']['WorkflowRunStatus'];
 
 /**
  * Base URL for SSE streams. In dev, bypasses Vite proxy by connecting directly
