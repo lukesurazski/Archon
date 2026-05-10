@@ -53,10 +53,11 @@ Archon is a **platform-agnostic AI coding assistant orchestrator** that connects
       └───────────────┼───────────────────┘
                       ▼
 ┌─────────────────────────────────────────────┐
-│    SQLite (default) / PostgreSQL (7 Tables)  │
+│    SQLite (default) / PostgreSQL (9 Tables) │
 │  • Codebases  • Conversations  • Sessions   │
-│  • Isolation Envs • Workflow Runs            │
-│  • Workflow Events • Messages                │
+│  • Isolation Envs  • Workflow Runs          │
+│  • Workflow Events  • Messages  • Tasks     │
+│  • Codebase Env Vars                        │
 └─────────────────────────────────────────────┘
 ```
 

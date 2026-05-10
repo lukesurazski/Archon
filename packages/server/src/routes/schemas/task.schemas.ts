@@ -3,7 +3,7 @@
  */
 import { z } from '@hono/zod-openapi';
 import { conversationSchema } from './conversation.schemas';
-import { workflowRunSchema } from './workflow.schemas';
+import { workflowRunSchema, workflowRunStatusSchema } from './workflow.schemas';
 
 export const taskStatusSchema = z.enum(['active', 'archived']).openapi('TaskStatus');
 
@@ -20,9 +20,7 @@ export const taskSchema = z
     created_at: z.string(),
     updated_at: z.string(),
     conversation_count: z.number(),
-    latest_run_status: z
-      .enum(['pending', 'running', 'completed', 'failed', 'cancelled', 'paused'])
-      .nullable(),
+    latest_run_status: workflowRunStatusSchema.nullable(),
     latest_run_started_at: z.string().nullable(),
     last_activity_at: z.string().nullable(),
   })

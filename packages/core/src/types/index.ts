@@ -45,8 +45,11 @@ export interface Task {
   pr_url: string | null;
   pr_number: number | null;
   status: 'active' | 'archived';
-  created_at: Date;
-  updated_at: Date;
+  // SQLite returns these as ISO strings via the TEXT column; PG returns
+  // ISO strings through node-postgres for TIMESTAMPTZ unless type parsers
+  // are overridden. Typed as string to match runtime on both backends.
+  created_at: string;
+  updated_at: string;
 }
 
 import type { IsolationHints } from '@archon/isolation';

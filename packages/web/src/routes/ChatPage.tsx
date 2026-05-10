@@ -72,6 +72,10 @@ export function ChatPage(): React.ReactElement {
   const [addError, setAddError] = useState<string | null>(null);
   const addInputRef = useRef<HTMLInputElement>(null);
 
+  // Task action error (createTask / new chat / archive). Single banner shared by
+  // all three because they're mutually exclusive in time from the user's POV.
+  const [taskActionError, setTaskActionError] = useState<string | null>(null);
+
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, String(width));
   }, [width]);
@@ -153,13 +157,14 @@ export function ChatPage(): React.ReactElement {
     const trimmed = title?.trim();
     if (!trimmed) return;
 
+    setTaskActionError(null);
     void createTask({ title: trimmed, codebaseId: selectedProjectId ?? undefined })
       .then(task => {
         void queryClient.invalidateQueries({ queryKey: ['tasks'] });
         navigate(`/chat/tasks/${encodeURIComponent(task.id)}`);
       })
       .catch((err: unknown) => {
-        console.error('[ChatPage] Failed to create task', err);
+        setTaskActionError(err instanceof Error ? err.message : 'Failed to create task');
       });
   }, [navigate, queryClient, selectedProjectId]);
 
@@ -174,6 +179,9 @@ export function ChatPage(): React.ReactElement {
         `/chat/tasks/${encodeURIComponent(selectedTask.id)}/chats/${encodeURIComponent(result.conversationId)}`
       );
     },
+    onError: err => {
+      setTaskActionError(err instanceof Error ? err.message : 'Failed to start chat');
+    },
   });
 
   const archiveMutation = useMutation({
@@ -181,6 +189,9 @@ export function ChatPage(): React.ReactElement {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['tasks'] });
       navigate('/chat');
+    },
+    onError: err => {
+      setTaskActionError(err instanceof Error ? err.message : 'Failed to archive task');
     },
   });
 
@@ -236,6 +247,11 @@ export function ChatPage(): React.ReactElement {
             <Plus className="h-4 w-4 shrink-0" />
             New Task
           </button>
+          {taskActionError && (
+            <div className="mt-2 rounded-md border border-error/30 bg-error/10 px-2 py-1.5 text-[11px] text-error">
+              {taskActionError}
+            </div>
+          )}
         </div>
 
         {/* Project filter */}

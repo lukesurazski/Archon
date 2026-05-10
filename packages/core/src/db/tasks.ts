@@ -2,6 +2,7 @@
  * Database operations for task containers.
  */
 import { pool, getDialect } from './connection';
+import { normalizeWorkflowRun } from './workflows';
 import type { Conversation, Task } from '../types';
 import type { WorkflowRun, WorkflowRunStatus } from '@archon/workflows/schemas/workflow-run';
 
@@ -43,17 +44,6 @@ export interface UpdateTaskInput {
 
 function normalizeTaskSummary<T extends TaskSummary>(row: T): T {
   row.conversation_count = row.conversation_count ?? 0;
-  return row;
-}
-
-function normalizeWorkflowRun<T extends WorkflowRun>(row: T): T {
-  if (typeof row.metadata === 'string') {
-    try {
-      row.metadata = JSON.parse(row.metadata) as Record<string, unknown>;
-    } catch {
-      row.metadata = {};
-    }
-  }
   return row;
 }
 

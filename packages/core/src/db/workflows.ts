@@ -28,12 +28,15 @@ class WorkflowRunGuardError extends Error {}
  * Normalize a WorkflowRun row from the database.
  * SQLite stores metadata as TEXT (JSON string), PostgreSQL returns parsed objects.
  * This ensures metadata is always a parsed object regardless of database backend.
+ * Malformed metadata is logged and falls back to {} so a single corrupt row
+ * does not 500 list endpoints.
  */
-function normalizeWorkflowRun<T extends WorkflowRun>(row: T): T {
+export function normalizeWorkflowRun<T extends WorkflowRun>(row: T): T {
   if (typeof row.metadata === 'string') {
     try {
       row.metadata = JSON.parse(row.metadata) as Record<string, unknown>;
-    } catch {
+    } catch (e) {
+      getLog().warn({ runId: row.id, err: e as Error }, 'db.workflow_run_metadata_parse_failed');
       row.metadata = {};
     }
   }

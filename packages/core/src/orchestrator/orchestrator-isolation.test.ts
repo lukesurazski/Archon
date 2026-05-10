@@ -286,4 +286,55 @@ describe('dispatchBackgroundWorkflow', () => {
       hidden: true,
     });
   });
+
+  test('propagates null task_id when parent has no task', async () => {
+    mockGetConversationById.mockResolvedValueOnce(
+      makeConversation({ id: 'parent-conv-1', task_id: null })
+    );
+    mockGetOrCreateConversation.mockResolvedValueOnce(makeConversation({ id: 'worker-conv-2' }));
+
+    await dispatchBackgroundWorkflow(
+      {
+        platform,
+        conversationId: 'parent-platform-conv',
+        conversationDbId: 'parent-conv-1',
+        cwd: '/workspace',
+        codebaseId: null,
+        originalMessage: 'review this PR',
+      },
+      { name: 'archon-smart-pr-review', description: 'Review a PR', steps: [] }
+    );
+
+    expect(mockUpdateConversation).toHaveBeenCalledWith('worker-conv-2', {
+      cwd: '/workspace',
+      codebase_id: null,
+      task_id: null,
+      hidden: true,
+    });
+  });
+
+  test('propagates DB errors from parent-conversation lookup (no silent fallback)', async () => {
+    // Lookup throwing must NOT be silently caught — the worker would otherwise
+    // be persisted with task_id=null and disappear from the task UI.
+    mockGetConversationById.mockRejectedValueOnce(new Error('db unavailable'));
+    mockGetOrCreateConversation.mockResolvedValueOnce(makeConversation({ id: 'worker-conv-3' }));
+
+    await expect(
+      dispatchBackgroundWorkflow(
+        {
+          platform,
+          conversationId: 'parent-platform-conv',
+          conversationDbId: 'parent-conv-1',
+          cwd: '/workspace',
+          codebaseId: null,
+          originalMessage: 'review this PR',
+        },
+        { name: 'archon-smart-pr-review', description: 'Review a PR', steps: [] }
+      )
+    ).rejects.toThrow('db unavailable');
+
+    // updateConversation must NOT have been called with a silently-stripped
+    // task_id — the throw must short-circuit before reaching it.
+    expect(mockUpdateConversation).not.toHaveBeenCalled();
+  });
 });

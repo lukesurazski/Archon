@@ -399,15 +399,16 @@ import type { DagNode, WorkflowDefinition } from '@/lib/api';
 
 ### Database Schema
 
-**8 Tables (all prefixed with `remote_agent_`):**
+**9 Tables (all prefixed with `remote_agent_`):**
 1. **`codebases`** - Repository metadata and commands (JSONB)
-2. **`conversations`** - Track platform conversations with titles and soft-delete support
+2. **`conversations`** - Track platform conversations with titles and soft-delete support (linked to a task container via nullable `task_id`)
 3. **`sessions`** - Track AI SDK sessions with resume capability
 4. **`isolation_environments`** - Git worktree isolation tracking
 5. **`workflow_runs`** - Workflow execution tracking and state
 6. **`workflow_events`** - Step-level workflow event log (step transitions, artifacts, errors)
 7. **`messages`** - Conversation message history with tool call metadata (JSONB)
 8. **`codebase_env_vars`** - Per-project env vars injected into project-scoped execution surfaces (Claude, Codex, bash/script nodes, and direct chat when codebase-scoped), managed via Web UI or `env:` in config
+9. **`tasks`** - Task containers grouping related conversations, workflow runs, branch name, and PR link under a single Web UI unit of work (soft-archive via `status='archived'`)
 
 **Key Patterns:**
 - Conversation ID format: Platform-specific (`thread_ts`, `chat_id`, `user/repo#123`)

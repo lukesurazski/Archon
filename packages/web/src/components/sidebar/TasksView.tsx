@@ -63,11 +63,18 @@ export function TasksView({
     },
   });
 
+  const mutationError = archiveMutation.error ?? restoreMutation.error;
+
   return (
     <div>
       <span className="px-1 text-[11px] font-semibold uppercase tracking-wider text-text-tertiary">
         Tasks
       </span>
+      {mutationError && (
+        <p className="px-1 text-xs text-error">
+          {mutationError instanceof Error ? mutationError.message : 'Failed to update task'}
+        </p>
+      )}
       <div className="mt-1 flex flex-col gap-0.5">
         {isError ? (
           <span className="px-1 text-xs text-error">Failed to load - retrying</span>

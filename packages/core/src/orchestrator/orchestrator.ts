@@ -273,15 +273,12 @@ export async function dispatchBackgroundWorkflow(
 
   // 2. Create worker conversation in DB
   const workerConv = await db.getOrCreateConversation('web', workerPlatformId);
-  const parentConversation = await db
-    .getConversationById(ctx.conversationDbId)
-    .catch((e: unknown) => {
-      getLog().warn(
-        { err: toError(e), parentConversationId: ctx.conversationDbId },
-        'orchestrator.parent_conversation_lookup_failed'
-      );
-      return null;
-    });
+  // Inherit task_id from the parent so worker runs aggregate under the same task.
+  // DB errors propagate — same posture as the surrounding updateConversation
+  // call. A silent task_id strip would make the worker's runs invisible in
+  // the task workspace UI; parent_conversation_id being null is the only
+  // expected "no task" path.
+  const parentConversation = await db.getConversationById(ctx.conversationDbId);
   await db.updateConversation(workerConv.id, {
     cwd: ctx.cwd,
     codebase_id: ctx.codebaseId ?? null,

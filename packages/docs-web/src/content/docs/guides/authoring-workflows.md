@@ -106,6 +106,51 @@ Nodes without `depends_on` run immediately. Nodes in the same topological layer 
 
 ---
 
+## Declaring Inputs (UI Metadata)
+
+You can optionally declare the workflow's expected input(s) at the top level.
+This is **purely UI metadata** -- at runtime the engine still passes a single
+`$ARGUMENTS` string. Declaring `inputs:` lets the Web UI render a properly
+labelled field with context-aware placeholder text.
+
+```yaml
+name: archon-comprehensive-pr-review
+description: Multi-agent PR review with auto-fix
+inputs:
+  - name: pr
+    type: pull_request
+    label: Pull request
+    description: PR number or GitHub pull request URL to review.
+    placeholder: "123 or https://github.com/owner/repo/pull/123"
+    required: true
+```
+
+### Supported types
+
+| Type           | Use for                                                    |
+|----------------|------------------------------------------------------------|
+| `text`         | Free-form prompt (default)                                 |
+| `pull_request` | PR number or full GitHub PR URL                            |
+| `branch`       | Git branch name                                            |
+| `path`         | Filesystem path (relative or absolute)                     |
+| `issue`        | GitHub issue number or URL                                 |
+| `number`       | Arbitrary number (port, ID, count, ...)                    |
+
+### Field reference
+
+- `name` (required) -- Identifier; today only the first input is consumed by `$ARGUMENTS`.
+- `type` (required) -- One of the values above.
+- `label`, `description`, `placeholder` (optional) -- UI labelling.
+- `required` (optional) -- Hint to the UI; runtime behaviour is unchanged.
+
+> **Runtime note:** `inputs:` does not parse `$ARGUMENTS` into typed fields.
+> Your prompts still receive the raw string. An invalid `inputs:` block (bad
+> enum value, missing `name`, or non-array shape) is logged as
+> `invalid_inputs_block_ignored` and silently dropped -- the workflow still
+> loads.
+
+---
+
 ## DAG-Based Workflow Schema
 
 ```yaml

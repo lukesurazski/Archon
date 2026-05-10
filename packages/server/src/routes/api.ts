@@ -1246,7 +1246,16 @@ export function registerApiRoutes(
     try {
       const codebaseId = c.req.query('codebaseId') ?? undefined;
       const rawStatus = c.req.query('status');
-      const status = rawStatus === 'archived' ? 'archived' : 'active';
+      // Reject unknown status explicitly — silent coercion ('foo' → 'active')
+      // would hide client bugs (e.g. a typo) and contradicts the documented
+      // enum in taskStatusSchema.
+      let status: 'active' | 'archived' = 'active';
+      if (rawStatus !== undefined) {
+        if (rawStatus !== 'active' && rawStatus !== 'archived') {
+          return apiError(c, 400, 'Invalid status', "Expected 'active' or 'archived'");
+        }
+        status = rawStatus;
+      }
       const limitRaw = Number(c.req.query('limit'));
       const limit = Number.isNaN(limitRaw) ? 100 : Math.min(Math.max(1, limitRaw), 500);
       const tasks = await taskDb.listTasks({ codebaseId, status, limit });
@@ -1351,7 +1360,10 @@ export function registerApiRoutes(
   });
 
   // POST /api/conversations - Create new conversation
-  // Accepts optional `message` field for atomic create+send (avoids ghost "Untitled" entries)
+  // Supports atomic create+send via `message` so the UI can avoid ghost
+  // "Untitled" entries when the client is creating a conversation just to send
+  // a single message. Body shape (codebaseId, taskId, message) is the source of
+  // truth in createConversationBodySchema.
   registerOpenApiRoute(createConversationRoute, async c => {
     try {
       const { codebaseId, taskId, message } = getValidatedBody(c, createConversationBodySchema);

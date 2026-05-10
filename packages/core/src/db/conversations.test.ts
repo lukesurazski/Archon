@@ -15,6 +15,7 @@ import {
   getOrCreateConversation,
   updateConversation,
   findConversationByPlatformId,
+  listConversations,
 } from './conversations';
 import type { Conversation } from '../types';
 import { ConversationNotFoundError } from '../types';
@@ -377,6 +378,35 @@ describe('conversations', () => {
           'Conversation not found: test-conv-id'
         );
       }
+    });
+  });
+
+  describe('listConversations', () => {
+    test('appends task_id filter when taskId is provided', async () => {
+      mockQuery.mockResolvedValueOnce(createQueryResult([]));
+      await listConversations(50, undefined, undefined, false, 'task-abc');
+      const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+      expect(sql).toContain('AND task_id = $');
+      expect(params).toContain('task-abc');
+    });
+
+    test('omits task_id filter when taskId is undefined', async () => {
+      mockQuery.mockResolvedValueOnce(createQueryResult([]));
+      await listConversations(50, undefined, undefined, false);
+      const [sql] = mockQuery.mock.calls[0] as [string, unknown[]];
+      expect(sql).not.toContain('task_id');
+    });
+
+    test('combines codebaseId and taskId filters with sequential placeholders', async () => {
+      mockQuery.mockResolvedValueOnce(createQueryResult([]));
+      await listConversations(50, undefined, 'cb-1', false, 'task-abc');
+      const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+      expect(sql).toContain('codebase_id = $1');
+      expect(sql).toContain('task_id = $2');
+      // params order: [codebaseId, taskId, limit]
+      expect(params[0]).toBe('cb-1');
+      expect(params[1]).toBe('task-abc');
+      expect(params[2]).toBe(50);
     });
   });
 });

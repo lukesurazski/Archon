@@ -93,6 +93,38 @@ describe('Workflow Loader', () => {
       ]);
     });
 
+    it('should accept inputs with only required fields (name + type)', async () => {
+      const workflowDir = join(testDir, '.archon', 'workflows');
+      await mkdir(workflowDir, { recursive: true });
+      const yaml = `name: test\ndescription: test\ninputs:\n  - name: pr\n    type: pull_request\nnodes:\n  - id: n\n    prompt: p\n`;
+      await writeFile(join(workflowDir, 'test.yaml'), yaml);
+      const result = await discoverWorkflows(testDir, { loadDefaults: false });
+      expect(result.errors).toHaveLength(0);
+      expect(result.workflows[0].workflow.inputs).toEqual([{ name: 'pr', type: 'pull_request' }]);
+    });
+
+    it('should silently drop inputs block when an item fails Zod validation', async () => {
+      // Bad enum value: workflow still loads (resilient), inputs is undefined,
+      // and a warn-level log is emitted.
+      const workflowDir = join(testDir, '.archon', 'workflows');
+      await mkdir(workflowDir, { recursive: true });
+      const yaml = `name: test\ndescription: test\ninputs:\n  - name: pr\n    type: not_a_real_type\nnodes:\n  - id: n\n    prompt: p\n`;
+      await writeFile(join(workflowDir, 'test.yaml'), yaml);
+      const result = await discoverWorkflows(testDir, { loadDefaults: false });
+      expect(result.errors).toHaveLength(0);
+      expect(result.workflows[0].workflow.inputs).toBeUndefined();
+    });
+
+    it('should silently drop inputs when raw.inputs is not an array', async () => {
+      const workflowDir = join(testDir, '.archon', 'workflows');
+      await mkdir(workflowDir, { recursive: true });
+      const yaml = `name: test\ndescription: test\ninputs: "just a string"\nnodes:\n  - id: n\n    prompt: p\n`;
+      await writeFile(join(workflowDir, 'test.yaml'), yaml);
+      const result = await discoverWorkflows(testDir, { loadDefaults: false });
+      expect(result.errors).toHaveLength(0);
+      expect(result.workflows[0].workflow.inputs).toBeUndefined();
+    });
+
     it('should preserve interactive: false when explicitly set', async () => {
       const workflowDir = join(testDir, '.archon', 'workflows');
       await mkdir(workflowDir, { recursive: true });
