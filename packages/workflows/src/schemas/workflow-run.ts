@@ -62,6 +62,11 @@ export type NodeState = z.infer<typeof nodeStateSchema>;
  * `output` is the concatenated assistant text (or JSON-encoded string from the SDK
  * when output_format is set). Empty string for failed/skipped nodes.
  * `error` is required when state is 'failed', absent on all other states.
+ * `nonRetryable` (failed only) signals the retry policy that the failure must
+ * not be retried even when `retry.onError: 'all'` is configured (e.g. the
+ * provider tool targeted a disallowed path, or a tool call timed out without
+ * producing a result). Structured at construction time so retry classification
+ * does not depend on string-matching the human-readable error message.
  */
 export const nodeOutputSchema = z.discriminatedUnion('state', [
   z.object({
@@ -74,6 +79,7 @@ export const nodeOutputSchema = z.discriminatedUnion('state', [
     output: z.string(),
     sessionId: z.string().optional(),
     error: z.string(),
+    nonRetryable: z.boolean().optional(),
   }),
   z.object({
     state: z.enum(['pending', 'skipped']),

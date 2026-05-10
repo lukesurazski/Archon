@@ -12,6 +12,11 @@ import {
 } from '@/lib/api';
 import { useDashboardSSE } from '@/hooks/useDashboardSSE';
 import type { TaskDetailResponse, WorkflowListEntry, WorkflowRunResponse } from '@/lib/api';
+import {
+  formatInputType,
+  getInputPlaceholder,
+  getTaskDefaultForInputs,
+} from '@/lib/task-input-defaults';
 import type { WorkflowState } from '@/lib/types';
 import { useWorkflowStore } from '@/stores/workflow-store';
 import { cn } from '@/lib/utils';
@@ -20,8 +25,6 @@ interface TaskWorkflowRunnerProps {
   task: TaskDetailResponse;
   cwd?: string;
 }
-
-type WorkflowInputMetadata = NonNullable<WorkflowListEntry['workflow']['inputs']>[number];
 
 function statusClass(status: string): string {
   return cn(
@@ -46,66 +49,6 @@ function formatStartedAt(run: WorkflowRunResponse): string {
     hour: '2-digit',
     minute: '2-digit',
   });
-}
-
-function formatInputType(type: WorkflowInputMetadata['type']): string {
-  switch (type) {
-    case 'pull_request':
-      return 'Pull request';
-    case 'branch':
-      return 'Branch';
-    case 'path':
-      return 'Path';
-    case 'issue':
-      return 'Issue';
-    case 'number':
-      return 'Number';
-    case 'text':
-      return 'Text';
-  }
-}
-
-function getInputPlaceholder(input?: WorkflowInputMetadata): string {
-  if (!input) return 'Workflow input / arguments';
-  if (input.placeholder) return input.placeholder;
-  switch (input.type) {
-    case 'pull_request':
-      return 'PR number or URL, e.g. 123 or https://github.com/owner/repo/pull/123';
-    case 'branch':
-      return 'Branch name, e.g. feat/task-container-workspace';
-    case 'path':
-      return 'File or directory path, e.g. .agents/plans/my-plan.md';
-    case 'issue':
-      return 'Issue number or URL, e.g. 456 or https://github.com/owner/repo/issues/456';
-    case 'number':
-      return 'Numeric input';
-    case 'text':
-      return 'Workflow input / arguments';
-  }
-}
-
-function getTaskDefaultForInput(task: TaskDetailResponse, input: WorkflowInputMetadata): string {
-  switch (input.type) {
-    case 'pull_request':
-      return task.pr_url ?? (task.pr_number !== null ? String(task.pr_number) : '');
-    case 'branch':
-      return task.branch_name ?? '';
-    case 'path':
-    case 'issue':
-    case 'number':
-    case 'text':
-      return '';
-  }
-}
-
-function getTaskDefaultForInputs(
-  task: TaskDetailResponse,
-  inputs: readonly WorkflowInputMetadata[]
-): string {
-  const contextualInput = inputs.find(
-    input => input.type === 'pull_request' || input.type === 'branch'
-  );
-  return contextualInput ? getTaskDefaultForInput(task, contextualInput) : '';
 }
 
 function getRunProgress(
@@ -296,7 +239,9 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
 
   const runMutation = useMutation({
     mutationFn: async () => {
-      if (!selectedWorkflow || !message.trim()) return;
+      if (!selectedWorkflow || !message.trim()) {
+        throw new Error('Workflow and input are required');
+      }
       let conversationId: string | undefined;
       let workflowStarted = false;
       try {

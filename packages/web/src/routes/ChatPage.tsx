@@ -13,12 +13,12 @@ import { useProject } from '@/contexts/ProjectContext';
 import {
   addCodebase,
   createConversation,
-  createTask,
   deleteTask,
   getCodebaseInput,
   getTask,
   listTasks,
 } from '@/lib/api';
+import { useCreateTaskFlow } from '@/hooks/useCreateTaskFlow';
 import type { CodebaseResponse } from '@/lib/api';
 
 const PANEL_MIN = 220;
@@ -72,9 +72,14 @@ export function ChatPage(): React.ReactElement {
   const [addError, setAddError] = useState<string | null>(null);
   const addInputRef = useRef<HTMLInputElement>(null);
 
-  // Task action error (createTask / new chat / archive). Single banner shared by
-  // all three because they're mutually exclusive in time from the user's POV.
+  // Single banner shared by createTask / new-chat / archive errors. These
+  // are related user actions and one error slot keeps the UI quiet
+  // (last writer wins). createTask usually navigates away on success, so
+  // the slot is rarely contested; new-chat + archive are bound to the same
+  // page but the simultaneous-flight case is benign — the surviving error
+  // is whichever finished most recently.
   const [taskActionError, setTaskActionError] = useState<string | null>(null);
+  const createTaskFlow = useCreateTaskFlow();
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, String(width));
@@ -153,20 +158,11 @@ export function ChatPage(): React.ReactElement {
   }, [codebases]);
 
   const handleNewTask = useCallback((): void => {
-    const title = window.prompt('Task title');
-    const trimmed = title?.trim();
-    if (!trimmed) return;
-
     setTaskActionError(null);
-    void createTask({ title: trimmed, codebaseId: selectedProjectId ?? undefined })
-      .then(task => {
-        void queryClient.invalidateQueries({ queryKey: ['tasks'] });
-        navigate(`/chat/tasks/${encodeURIComponent(task.id)}`);
-      })
-      .catch((err: unknown) => {
-        setTaskActionError(err instanceof Error ? err.message : 'Failed to create task');
-      });
-  }, [navigate, queryClient, selectedProjectId]);
+    createTaskFlow({ codebaseId: selectedProjectId ?? undefined }).catch((err: unknown) => {
+      setTaskActionError(err instanceof Error ? err.message : 'Failed to create task');
+    });
+  }, [createTaskFlow, selectedProjectId]);
 
   const newChatMutation = useMutation({
     mutationFn: () =>

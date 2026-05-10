@@ -1,10 +1,11 @@
 import { useMemo } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router';
-import { createTask, listTasks, listWorkflowRuns, getCodebaseEnvironments } from '@/lib/api';
+import { listTasks, listWorkflowRuns, getCodebaseEnvironments } from '@/lib/api';
 import type { WorkflowRunResponse, IsolationEnvironment } from '@/lib/api';
 import { WorkflowInvoker } from '@/components/sidebar/WorkflowInvoker';
 import { TasksView } from '@/components/sidebar/TasksView';
+import { useCreateTaskFlow } from '@/hooks/useCreateTaskFlow';
 import { formatDuration } from '@/lib/format';
 import { cn } from '@/lib/utils';
 
@@ -38,7 +39,7 @@ export function ProjectDetail({
   searchQuery,
 }: ProjectDetailProps): React.ReactElement {
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
+  const createTaskFlow = useCreateTaskFlow();
 
   const { data: tasks, isError: isErrorTasks } = useQuery({
     queryKey: ['tasks', codebaseId],
@@ -70,12 +71,8 @@ export function ProjectDetail({
   );
 
   const handleNewTask = (): void => {
-    const title = window.prompt('Task title');
-    const trimmed = title?.trim();
-    if (!trimmed) return;
-    void createTask({ title: trimmed, codebaseId }).then(task => {
-      void queryClient.invalidateQueries({ queryKey: ['tasks'] });
-      navigate(`/chat/tasks/${encodeURIComponent(task.id)}`);
+    createTaskFlow({ codebaseId }).catch((err: unknown) => {
+      console.warn('[ProjectDetail] createTask failed', err);
     });
   };
 

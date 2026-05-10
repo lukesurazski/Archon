@@ -463,11 +463,19 @@ function isTransientNodeError(errorMessage: string): boolean {
   return classifyError(new Error(errorMessage)) === 'TRANSIENT';
 }
 
-function isNonRetryableWorkflowSafetyError(errorMessage: string): boolean {
-  return (
-    errorMessage.includes('targeted path outside the workflow working path') ||
-    errorMessage.includes('without producing a result')
-  );
+/**
+ * Thrown when a node must not be retried even when `retry.onError: 'all'` is
+ * configured: provider tool targeted a disallowed path, or a tool call timed
+ * out without producing a result. Catch sites translate this into a
+ * `nodeOutput.nonRetryable: true` flag so the retry policy classifies via
+ * structured data rather than substring-matching the error message.
+ */
+class WorkflowNonRetryableError extends Error {
+  readonly nonRetryable = true;
+  constructor(message: string) {
+    super(message);
+    this.name = 'WorkflowNonRetryableError';
+  }
 }
 
 interface NodeProviderDisplayMeta {
@@ -1086,7 +1094,7 @@ async function executeNodeInternal(
           const errorMessage = `Tool '${msg.toolName}' in node '${node.id}' targeted path outside the workflow working path: ${disallowedPath}`;
           nodeSafetyViolation = true;
           nodeAbortController.abort();
-          throw new Error(errorMessage);
+          throw new WorkflowNonRetryableError(errorMessage);
         }
 
         // Emit tool_completed for the previous tool (fire-and-forget)
@@ -1374,7 +1382,12 @@ async function executeNodeInternal(
       lastNodeCancelCheck.delete(`${workflowRun.id}:${node.id}`);
       lastNodeActivityUpdate.delete(`${workflowRun.id}:${node.id}`);
 
-      return { state: 'failed', output: nodeOutputText, error: timeoutError };
+      return {
+        state: 'failed',
+        output: nodeOutputText,
+        error: timeoutError,
+        nonRetryable: true,
+      };
     }
 
     // If cancelled during streaming (not idle timeout), return as failed with cancel reason
@@ -1593,7 +1606,17 @@ async function executeNodeInternal(
       error: err.message,
     });
 
-    return { state: 'failed', output: '', error: err.message, costUsd: nodeCostUsd };
+    // Safety violations (path-allowlist + tool-timeout) must short-circuit the
+    // retry policy. Detect via the typed error class OR the local flag set at
+    // the safety throw site — both should carry the same signal.
+    const nonRetryable = err instanceof WorkflowNonRetryableError || nodeSafetyViolation;
+    return {
+      state: 'failed',
+      output: '',
+      error: err.message,
+      costUsd: nodeCostUsd,
+      ...(nonRetryable ? { nonRetryable: true } : {}),
+    };
   }
 }
 
@@ -2318,7 +2341,7 @@ async function executeLoopNode(
           );
           if (disallowedPath) {
             iterationAbortController.abort();
-            throw new Error(
+            throw new WorkflowNonRetryableError(
               `Tool '${msg.toolName}' in loop '${node.id}' targeted path outside the workflow working path: ${disallowedPath}`
             );
           }
@@ -2394,7 +2417,7 @@ async function executeLoopNode(
 
       if (iterationToolTimedOut) {
         const timedOutTool = iterationToolTimedOut as { toolName: string; elapsedMs: number };
-        throw new Error(
+        throw new WorkflowNonRetryableError(
           `Tool '${timedOutTool.toolName}' in loop '${node.id}' timed out after ${String(Math.round(timedOutTool.elapsedMs / 1000))}s without producing a result.`
         );
       }
@@ -2419,11 +2442,13 @@ async function executeLoopNode(
         .catch((evtErr: Error) => {
           logEventStoreError(evtErr, i);
         });
+      const nonRetryable = err instanceof WorkflowNonRetryableError;
       return {
         state: 'failed',
         output: '',
         error: `Loop iteration ${i} failed: ${err.message}`,
         costUsd: loopTotalCostUsd,
+        ...(nonRetryable ? { nonRetryable: true } : {}),
       };
     }
 
@@ -3302,12 +3327,12 @@ export async function executeDagWorkflow(
 
             // Check if retryable.
             // FATAL errors (auth, permissions, credit balance) are never retried even when on_error:all.
+            // Safety violations (path allowlist, tool-call timeout) carry a structured
+            // `nonRetryable` flag set at the throw site — see WorkflowNonRetryableError.
             const isFatal = output.error
               ? classifyError(new Error(output.error)) === 'FATAL'
               : false;
-            const isSafetyError = output.error
-              ? isNonRetryableWorkflowSafetyError(output.error)
-              : false;
+            const isSafetyError = output.nonRetryable === true;
             const isTransient = output.error ? isTransientNodeError(output.error) : false;
             const shouldRetry =
               !isFatal &&

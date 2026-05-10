@@ -34,8 +34,8 @@ describe('tasks db', () => {
     pr_url: null,
     pr_number: null,
     status: 'active',
-    created_at: '2026-05-10T00:00:00Z',
-    updated_at: '2026-05-10T00:00:00Z',
+    created_at: new Date('2026-05-10T00:00:00Z'),
+    updated_at: new Date('2026-05-10T00:00:00Z'),
     conversation_count: 0,
     latest_run_status: null,
     latest_run_started_at: null,
@@ -111,6 +111,85 @@ describe('tasks db', () => {
       expect(result).not.toBeNull();
       expect(result?.conversations).toHaveLength(1);
       expect(result?.workflow_runs).toHaveLength(1);
+    });
+
+    test('conversations query excludes soft-deleted rows', async () => {
+      mockQuery
+        .mockResolvedValueOnce(createQueryResult([mockTaskRow]))
+        .mockResolvedValueOnce(createQueryResult([]))
+        .mockResolvedValueOnce(createQueryResult([]));
+      await getTaskDetail('task-1');
+      const [convSql] = mockQuery.mock.calls[1] as [string, unknown[]];
+      // Guards against a refactor that drops the deleted_at filter and starts
+      // leaking soft-deleted conversations into the task workspace UI.
+      expect(convSql).toContain('deleted_at IS NULL');
+    });
+
+    test('workflow_runs query aggregates both direct and parent_conversation rows', async () => {
+      mockQuery
+        .mockResolvedValueOnce(createQueryResult([mockTaskRow]))
+        .mockResolvedValueOnce(createQueryResult([]))
+        .mockResolvedValueOnce(createQueryResult([]));
+      await getTaskDetail('task-1');
+      const [runsSql] = mockQuery.mock.calls[2] as [string, unknown[]];
+      // The OR clause is load-bearing: background workers (spawned via
+      // dispatchBackgroundWorkflow) inherit the parent's task_id, so their
+      // workflow_runs reach the task via parent_conversation_id rather than
+      // direct conversation_id.
+      expect(runsSql).toContain('c.id = r.conversation_id OR c.id = r.parent_conversation_id');
+    });
+
+    test('applies normalizeWorkflowRun to parse stringified metadata', async () => {
+      mockQuery
+        .mockResolvedValueOnce(createQueryResult([mockTaskRow]))
+        .mockResolvedValueOnce(createQueryResult([]))
+        .mockResolvedValueOnce(
+          createQueryResult([{ id: 'run-1', metadata: '{"k":"v"}' } as never])
+        );
+      const result = await getTaskDetail('task-1');
+      expect(result?.workflow_runs[0]?.metadata).toEqual({ k: 'v' });
+    });
+  });
+
+  describe('normalizeTaskSummary (timestamp coercion)', () => {
+    test('coerces SQLite string created_at/updated_at to Date', async () => {
+      mockQuery.mockResolvedValueOnce(
+        createQueryResult([
+          {
+            ...mockTaskRow,
+            created_at: '2026-05-10T00:00:00Z' as unknown as Date,
+            updated_at: '2026-05-10T00:00:00Z' as unknown as Date,
+          },
+        ])
+      );
+      const result = await getTask('task-1');
+      expect(result?.created_at).toBeInstanceOf(Date);
+      expect(result?.updated_at).toBeInstanceOf(Date);
+    });
+
+    test('passes Date created_at/updated_at through unchanged (PG path)', async () => {
+      const pgDate = new Date('2026-05-10T00:00:00Z');
+      mockQuery.mockResolvedValueOnce(
+        createQueryResult([{ ...mockTaskRow, created_at: pgDate, updated_at: pgDate }])
+      );
+      const result = await getTask('task-1');
+      expect(result?.created_at).toBe(pgDate);
+      expect(result?.updated_at).toBe(pgDate);
+    });
+
+    test('coerces nullable Date columns when SQLite returns strings', async () => {
+      mockQuery.mockResolvedValueOnce(
+        createQueryResult([
+          {
+            ...mockTaskRow,
+            latest_run_started_at: '2026-05-10T01:00:00Z' as unknown as Date,
+            last_activity_at: '2026-05-10T02:00:00Z' as unknown as Date,
+          },
+        ])
+      );
+      const result = await getTask('task-1');
+      expect(result?.latest_run_started_at).toBeInstanceOf(Date);
+      expect(result?.last_activity_at).toBeInstanceOf(Date);
     });
   });
 

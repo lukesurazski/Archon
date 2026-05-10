@@ -9,8 +9,8 @@ import type { WorkflowRun, WorkflowRunStatus } from '@archon/workflows/schemas/w
 export interface TaskSummary extends Task {
   conversation_count: number;
   latest_run_status: WorkflowRunStatus | null;
-  latest_run_started_at: string | null;
-  last_activity_at: string | null;
+  latest_run_started_at: Date | null;
+  last_activity_at: Date | null;
 }
 
 export interface TaskDetail extends TaskSummary {
@@ -42,11 +42,31 @@ export interface UpdateTaskInput {
   status?: 'active' | 'archived';
 }
 
+/**
+ * Coerce SQLite ISO-string timestamps to `Date` so callers can rely on the
+ * declared `Date` typing regardless of backend (node-postgres already returns
+ * `Date` for TIMESTAMPTZ). Mirrors `normalizeWorkflowRun` in `workflows.ts`.
+ */
 function normalizeTaskSummary<T extends TaskSummary>(row: T): T {
   row.conversation_count = row.conversation_count ?? 0;
+  if (typeof row.created_at === 'string') row.created_at = new Date(row.created_at);
+  if (typeof row.updated_at === 'string') row.updated_at = new Date(row.updated_at);
+  if (typeof row.latest_run_started_at === 'string') {
+    row.latest_run_started_at = new Date(row.latest_run_started_at);
+  }
+  if (typeof row.last_activity_at === 'string') {
+    row.last_activity_at = new Date(row.last_activity_at);
+  }
   return row;
 }
 
+/**
+ * Builds the summary SELECT used by listTasks/getTask/getTaskDetail. Joins
+ * workflow runs via `COALESCE(parent_conversation_id, conversation_id)` so
+ * background-worker runs (which inherit the parent's task_id — see
+ * orchestrator.ts `dispatchBackgroundWorkflow`) roll up under the same task
+ * as their parent conversation.
+ */
 function taskSummarySelect(): string {
   return `SELECT t.*,
     (SELECT CAST(COUNT(*) AS INTEGER) FROM remote_agent_conversations c
