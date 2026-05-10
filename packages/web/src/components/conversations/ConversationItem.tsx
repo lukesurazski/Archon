@@ -55,6 +55,11 @@ export function ConversationItem({
   const params = useParams<{ conversationId: string }>();
   const isRerunning = workflowRun?.id === rerunningWorkflowRunId;
   const effectiveStatus = workflowRun?.status ?? status;
+  const canRunAgain =
+    workflowRun !== undefined &&
+    (workflowRun.status === 'completed' ||
+      workflowRun.status === 'failed' ||
+      workflowRun.status === 'cancelled');
 
   const displayName = conversation.title
     ? conversation.title.length > 30
@@ -244,7 +249,7 @@ export function ConversationItem({
                 Graph
               </button>
             )}
-            {workflowRun && onRerunWorkflow && (
+            {canRunAgain && onRerunWorkflow && (
               <button
                 onClick={handleRunWorkflowAgain}
                 disabled={isRerunning}
@@ -269,7 +274,7 @@ export function ConversationItem({
                 <ArrowRight className="h-3.5 w-3.5 text-text-tertiary hover:text-primary" />
               </button>
             )}
-            {workflowRun && onRerunWorkflow && (
+            {canRunAgain && onRerunWorkflow && (
               <button
                 onClick={handleRunWorkflowAgain}
                 disabled={isRerunning}

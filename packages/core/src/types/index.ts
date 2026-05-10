@@ -50,6 +50,10 @@ export interface HandleMessageContext {
   readonly threadContext?: string;
   readonly parentConversationId?: string;
   readonly isolationHints?: IsolationHints;
+  readonly workflowExecution?: {
+    /** Start a separate execution instead of auto-resuming failed/paused prior runs. */
+    readonly forceFresh?: boolean;
+  };
   readonly attachedFiles?: AttachedFile[];
 }
 

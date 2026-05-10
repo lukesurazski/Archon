@@ -1820,7 +1820,7 @@ export function registerApiRoutes(
       return apiError(c, 400, 'Invalid workflow name');
     }
     try {
-      const { conversationId, message } = getValidatedBody(c, runWorkflowBodySchema);
+      const { conversationId, message, forceFresh } = getValidatedBody(c, runWorkflowBodySchema);
       // Persist user message and register DB ID (same as message endpoint)
       let conv: Awaited<ReturnType<typeof conversationDb.findConversationByPlatformId>> = null;
       try {
@@ -1848,7 +1848,11 @@ export function registerApiRoutes(
       }
 
       const fullMessage = `/workflow run ${workflowName} ${message}`;
-      const result = await dispatchToOrchestrator(conversationId, fullMessage);
+      const result = await dispatchToOrchestrator(
+        conversationId,
+        fullMessage,
+        forceFresh ? { workflowExecution: { forceFresh: true } } : undefined
+      );
       return c.json(result);
     } catch (error) {
       getLog().error({ err: error }, 'run_workflow_failed');

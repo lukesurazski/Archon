@@ -205,6 +205,8 @@ export const runWorkflowBodySchema = z
   .object({
     conversationId: z.string(),
     message: z.string(),
+    /** Start a separate execution instead of auto-resuming a prior failed/paused run. */
+    forceFresh: z.boolean().optional(),
   })
   .openapi('RunWorkflowBody');
 

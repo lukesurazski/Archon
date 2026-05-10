@@ -246,6 +246,12 @@ export interface WorkflowRoutingContext {
    * Hints for isolation environment (PR review context, etc.)
    */
   readonly isolationHints?: IsolationHints;
+  /**
+   * Workflow execution controls that do not affect isolation selection.
+   */
+  readonly workflowExecution?: {
+    readonly forceFresh?: boolean;
+  };
 }
 
 /**
@@ -374,7 +380,8 @@ export async function dispatchBackgroundWorkflow(
           ctx.issueContext,
           isolationContext,
           ctx.conversationDbId,
-          preCreatedRun
+          preCreatedRun,
+          ctx.workflowExecution?.forceFresh ? { forceFresh: true } : undefined
         );
         // Surface workflow output to parent conversation as a result card
         if ('paused' in result) {

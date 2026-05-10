@@ -173,7 +173,9 @@ export function ChatPage(): React.ReactElement {
       void createConversation(run.codebaseId ?? undefined)
         .then(({ conversationId }) => {
           newConversationId = conversationId;
-          return runWorkflow(run.workflowName, conversationId, run.userMessage);
+          return runWorkflow(run.workflowName, conversationId, run.userMessage, {
+            forceFresh: true,
+          });
         })
         .then(() => {
           workflowStarted = true;

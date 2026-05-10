@@ -285,12 +285,13 @@ export async function listWorkflows(cwd?: string): Promise<WorkflowListEntry[]> 
 export async function runWorkflow(
   name: string,
   conversationId: string,
-  message: string
+  message: string,
+  options?: { forceFresh?: boolean }
 ): Promise<{ accepted: boolean; status: string }> {
   return fetchJSON(`/api/workflows/${encodeURIComponent(name)}/run`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ conversationId, message }),
+    body: JSON.stringify({ conversationId, message, forceFresh: options?.forceFresh }),
   });
 }
 

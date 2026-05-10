@@ -244,7 +244,15 @@ export async function executeWorkflow(
     prBranch?: string;
   },
   parentConversationId?: string,
-  preCreatedRun?: WorkflowRun
+  preCreatedRun?: WorkflowRun,
+  options?: {
+    /**
+     * Skip DAG auto-resume and force creation/use of a separate workflow run.
+     * Used by UI "Run again" so a prior failed/paused run is not mutated back
+     * to running when the user explicitly wants another execution.
+     */
+    forceFresh?: boolean;
+  }
 ): Promise<WorkflowExecutionResult> {
   // Load config once for the entire workflow execution
   const fileConfig = await deps.loadConfig(cwd);
@@ -310,8 +318,10 @@ export async function executeWorkflow(
   let dagPriorCompletedNodes: Map<string, string> | undefined;
   let workflowRun: WorkflowRun | undefined = preCreatedRun;
 
-  // Resume detection: check for prior failed run on same workflow + worktree
-  {
+  // Resume detection: check for prior failed run on same workflow + worktree.
+  // Some entrypoints (notably UI "Run again") explicitly request a separate
+  // execution, so skip auto-resume for those calls.
+  if (!options?.forceFresh) {
     // Step 1: Find prior failed run — non-critical, fall through on DB error
     let resumableRun: Awaited<ReturnType<typeof deps.store.findResumableRun>> = null;
     try {
