@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ChevronDown, Loader2, Play } from 'lucide-react';
@@ -76,6 +76,30 @@ function getInputPlaceholder(input?: WorkflowInputMetadata): string {
   }
 }
 
+function getTaskDefaultForInput(task: TaskDetailResponse, input: WorkflowInputMetadata): string {
+  switch (input.type) {
+    case 'pull_request':
+      return task.pr_url ?? (task.pr_number !== null ? String(task.pr_number) : '');
+    case 'branch':
+      return task.branch_name ?? '';
+    case 'path':
+    case 'issue':
+    case 'number':
+    case 'text':
+      return '';
+  }
+}
+
+function getTaskDefaultForInputs(
+  task: TaskDetailResponse,
+  inputs: readonly WorkflowInputMetadata[]
+): string {
+  const contextualInput = inputs.find(
+    input => input.type === 'pull_request' || input.type === 'branch'
+  );
+  return contextualInput ? getTaskDefaultForInput(task, contextualInput) : '';
+}
+
 export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): React.ReactElement {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -85,6 +109,7 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
   const [message, setMessage] = useState('');
   const [error, setError] = useState<string | null>(null);
   const workflowPickerBlurTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastAutoFilledMessage = useRef('');
 
   const { data: workflows, isError: workflowsError } = useQuery({
     queryKey: ['workflows', cwd ?? null],
@@ -123,11 +148,28 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
   );
   const selectedWorkflowInputs = selectedWorkflowEntry?.workflow.inputs ?? [];
   const primaryWorkflowInput = selectedWorkflowInputs[0];
+  const taskDefaultMessage = getTaskDefaultForInputs(task, selectedWorkflowInputs);
+
+  useEffect(() => {
+    if (!selectedWorkflow || !taskDefaultMessage) return;
+    setMessage(current => {
+      if (current.trim() !== '' && current !== lastAutoFilledMessage.current) return current;
+      lastAutoFilledMessage.current = taskDefaultMessage;
+      return taskDefaultMessage;
+    });
+  }, [selectedWorkflow, taskDefaultMessage]);
 
   function selectWorkflow(entry: WorkflowListEntry): void {
     setSelectedWorkflow(entry.workflow.name);
     setWorkflowSearch(entry.workflow.name);
     setWorkflowPickerOpen(false);
+    const defaultMessage = getTaskDefaultForInputs(task, entry.workflow.inputs ?? []);
+    setMessage(current => {
+      if (!defaultMessage) return current;
+      if (current.trim() !== '' && current !== lastAutoFilledMessage.current) return current;
+      lastAutoFilledMessage.current = defaultMessage;
+      return defaultMessage;
+    });
   }
 
   const runMutation = useMutation({
@@ -280,6 +322,9 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
             value={message}
             onChange={(e): void => {
               setMessage(e.target.value);
+              if (e.target.value !== lastAutoFilledMessage.current) {
+                lastAutoFilledMessage.current = '';
+              }
             }}
             onKeyDown={(e): void => {
               if (e.key === 'Enter' && selectedWorkflow && message.trim()) {
