@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Loader2, Play } from 'lucide-react';
+import { ChevronDown, Loader2, Play } from 'lucide-react';
 import {
   createConversation,
   deleteConversation,
@@ -9,7 +9,7 @@ import {
   listWorkflows,
   runWorkflow,
 } from '@/lib/api';
-import type { TaskDetailResponse, WorkflowRunResponse } from '@/lib/api';
+import type { TaskDetailResponse, WorkflowListEntry, WorkflowRunResponse } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 interface TaskWorkflowRunnerProps {
@@ -42,8 +42,11 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [selectedWorkflow, setSelectedWorkflow] = useState('');
+  const [workflowSearch, setWorkflowSearch] = useState('');
+  const [workflowPickerOpen, setWorkflowPickerOpen] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const workflowPickerBlurTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const { data: workflows, isError: workflowsError } = useQuery({
     queryKey: ['workflows', cwd ?? null],
@@ -62,6 +65,22 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
     () => [...(workflows ?? [])].sort((a, b) => a.workflow.name.localeCompare(b.workflow.name)),
     [workflows]
   );
+
+  const filteredWorkflows = useMemo((): WorkflowListEntry[] => {
+    const query = workflowSearch.trim().toLowerCase();
+    if (!query) return sortedWorkflows;
+    return sortedWorkflows.filter(entry => {
+      const name = entry.workflow.name.toLowerCase();
+      const source = entry.source.toLowerCase();
+      return name.includes(query) || source.includes(query);
+    });
+  }, [sortedWorkflows, workflowSearch]);
+
+  function selectWorkflow(entry: WorkflowListEntry): void {
+    setSelectedWorkflow(entry.workflow.name);
+    setWorkflowSearch(entry.workflow.name);
+    setWorkflowPickerOpen(false);
+  }
 
   const runMutation = useMutation({
     mutationFn: async () => {
@@ -91,6 +110,7 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
     },
     onSuccess: conversationId => {
       setSelectedWorkflow('');
+      setWorkflowSearch('');
       setMessage('');
       setError(null);
       void queryClient.invalidateQueries({ queryKey: ['workflow-runs', { taskId: task.id }] });
@@ -118,20 +138,86 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
       <div className="space-y-3 p-4">
         {workflowsError && <p className="text-xs text-error">Failed to load workflows.</p>}
         <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_auto]">
-          <select
-            value={selectedWorkflow}
-            onChange={(e): void => {
-              setSelectedWorkflow(e.target.value);
-            }}
-            className="rounded-md border border-border bg-surface-elevated px-3 py-2 text-sm text-text-primary outline-none focus:border-primary"
-          >
-            <option value="">Select workflow...</option>
-            {sortedWorkflows.map(entry => (
-              <option key={`${entry.source}:${entry.workflow.name}`} value={entry.workflow.name}>
-                {entry.workflow.name} ({entry.source})
-              </option>
-            ))}
-          </select>
+          <div className="relative">
+            <div className="relative">
+              <input
+                value={workflowSearch}
+                onFocus={(): void => {
+                  if (workflowPickerBlurTimeout.current) {
+                    clearTimeout(workflowPickerBlurTimeout.current);
+                    workflowPickerBlurTimeout.current = null;
+                  }
+                  setWorkflowPickerOpen(true);
+                }}
+                onBlur={(): void => {
+                  workflowPickerBlurTimeout.current = setTimeout(() => {
+                    setWorkflowPickerOpen(false);
+                  }, 120);
+                }}
+                onChange={(e): void => {
+                  const value = e.target.value;
+                  setWorkflowSearch(value);
+                  setWorkflowPickerOpen(true);
+                  if (value !== selectedWorkflow) setSelectedWorkflow('');
+                }}
+                onKeyDown={(e): void => {
+                  if (e.key === 'Enter') {
+                    if (!selectedWorkflow && filteredWorkflows[0]) {
+                      e.preventDefault();
+                      selectWorkflow(filteredWorkflows[0]);
+                    }
+                  } else if (e.key === 'Escape') {
+                    setWorkflowPickerOpen(false);
+                  } else if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    setWorkflowPickerOpen(true);
+                  }
+                }}
+                placeholder="Search workflows..."
+                role="combobox"
+                aria-expanded={workflowPickerOpen}
+                aria-controls="task-workflow-picker-list"
+                aria-autocomplete="list"
+                className="w-full rounded-md border border-border bg-surface-elevated px-3 py-2 pr-9 text-sm text-text-primary outline-none placeholder:text-text-tertiary focus:border-primary"
+              />
+              <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-text-tertiary" />
+            </div>
+            {workflowPickerOpen && (
+              <div
+                id="task-workflow-picker-list"
+                role="listbox"
+                className="absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-md border border-border bg-surface-elevated shadow-lg"
+              >
+                {filteredWorkflows.length > 0 ? (
+                  filteredWorkflows.map(entry => (
+                    <button
+                      key={`${entry.source}:${entry.workflow.name}`}
+                      type="button"
+                      role="option"
+                      aria-selected={selectedWorkflow === entry.workflow.name}
+                      onMouseDown={(e): void => {
+                        e.preventDefault();
+                        selectWorkflow(entry);
+                      }}
+                      className={cn(
+                        'flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-surface-secondary',
+                        selectedWorkflow === entry.workflow.name && 'bg-accent-muted text-primary'
+                      )}
+                    >
+                      <span className="min-w-0 truncate text-text-primary">
+                        {entry.workflow.name}
+                      </span>
+                      <span className="shrink-0 rounded bg-surface-secondary px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-tertiary">
+                        {entry.source}
+                      </span>
+                    </button>
+                  ))
+                ) : (
+                  <div className="px-3 py-3 text-sm text-text-tertiary">No workflows found.</div>
+                )}
+              </div>
+            )}
+          </div>
           <input
             value={message}
             onChange={(e): void => {
