@@ -109,7 +109,7 @@ export function ChatPage(): React.ReactElement {
 
   const { data: runs } = useQuery({
     queryKey: ['workflow-runs-status'],
-    queryFn: () => listWorkflowRuns({ limit: 50 }),
+    queryFn: () => listWorkflowRuns({ limit: 200 }),
     refetchInterval: 10_000,
   });
 
@@ -353,10 +353,11 @@ export function ChatPage(): React.ReactElement {
           <div className="flex flex-col gap-0.5">
             {filtered && filtered.length > 0 ? (
               filtered.map(conv => {
-                // latestWorkflowRunMap is keyed by parent_conversation_id ?? conversation_id
-                // (workflow run conversation IDs), which corresponds to the conversation's
-                // platform_conversation_id, NOT the internal `id`.
-                const latestRun = latestWorkflowRunMap.get(conv.platform_conversation_id);
+                // Workflow run conversation fields are internal DB IDs in /api/workflows/runs.
+                // Keep a platform-id fallback for compatibility if the API is enriched later.
+                const latestRun =
+                  latestWorkflowRunMap.get(conv.id) ??
+                  latestWorkflowRunMap.get(conv.platform_conversation_id);
                 return (
                   <ConversationItem
                     key={conv.id}
