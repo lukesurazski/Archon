@@ -37,6 +37,7 @@ import {
   ConversationNotFoundError,
   isWebAdapter,
 } from '../types';
+import type { WorkflowExecutionOptions } from '../types';
 import type { IsolationHints, IsolationEnvironmentRow } from '@archon/isolation';
 import {
   IsolationBlockedError,
@@ -249,9 +250,7 @@ export interface WorkflowRoutingContext {
   /**
    * Workflow execution controls that do not affect isolation selection.
    */
-  readonly workflowExecution?: {
-    readonly forceFresh?: boolean;
-  };
+  readonly workflowExecution?: WorkflowExecutionOptions;
 }
 
 /**

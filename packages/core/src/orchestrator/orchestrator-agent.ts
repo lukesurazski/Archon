@@ -14,6 +14,7 @@ import type {
   Conversation,
   Codebase,
   AttachedFile,
+  WorkflowExecutionOptions,
 } from '../types';
 import type { SendQueryOptions } from '@archon/providers/types';
 import { ConversationNotFoundError } from '../types';
@@ -222,7 +223,7 @@ async function dispatchOrchestratorWorkflow(
   workflow: WorkflowDefinition,
   userMessage: string,
   isolationHints?: HandleMessageContext['isolationHints'],
-  workflowExecution?: HandleMessageContext['workflowExecution']
+  workflowExecution?: WorkflowExecutionOptions
 ): Promise<void> {
   // Auto-attach project to conversation
   await db.updateConversation(conversation.id, {
@@ -270,6 +271,26 @@ async function dispatchOrchestratorWorkflow(
 
   // Dispatch workflow
   if (platform.getPlatformType() === 'web') {
+    // forceFresh + interactive on web cannot start a separate run: the foreground path
+    // reuses the conversation's `cwd`, and the executor's path-lock guard would cancel
+    // the new run against any existing paused run on that same `working_path`. Reject
+    // explicitly until interactive force-fresh allocates a fresh worker/isolation.
+    if (workflowExecution?.forceFresh && workflow.interactive) {
+      getLog().warn(
+        {
+          conversationId,
+          workflowName: workflow.name,
+          codebaseId: codebase.id,
+        },
+        'workflow.force_fresh_rejected'
+      );
+      await platform.sendMessage(
+        conversationId,
+        `❌ Cannot rerun **${workflow.name}** while a paused run exists: interactive workflows reuse the conversation's working path, so a forced rerun would conflict with the existing run. Abandon or complete the paused run first, then try again.`
+      );
+      return;
+    }
+
     // Check for a resumable run from a prior dispatch (e.g. approved approval gate).
     // A new background dispatch would create a new worker conversation and never find
     // the prior run's worktree. Execute in foreground to reuse the original working path.
@@ -953,7 +974,7 @@ async function handleStreamMode(
   isolationHints: HandleMessageContext['isolationHints'],
   conversation: Conversation,
   issueContext?: string,
-  workflowExecution?: HandleMessageContext['workflowExecution'],
+  workflowExecution?: WorkflowExecutionOptions,
   requestOptions?: SendQueryOptions
 ): Promise<void> {
   const allMessages: string[] = [];
@@ -1103,7 +1124,7 @@ async function handleBatchMode(
   isolationHints: HandleMessageContext['isolationHints'],
   conversation: Conversation,
   issueContext?: string,
-  workflowExecution?: HandleMessageContext['workflowExecution'],
+  workflowExecution?: WorkflowExecutionOptions,
   requestOptions?: SendQueryOptions
 ): Promise<void> {
   const allChunks: { type: string; content: string }[] = [];
@@ -1268,7 +1289,7 @@ async function handleWorkflowInvocationResult(
   originalMessage: string,
   isolationHints: HandleMessageContext['isolationHints'],
   issueContext?: string,
-  workflowExecution?: HandleMessageContext['workflowExecution']
+  workflowExecution?: WorkflowExecutionOptions
 ): Promise<void> {
   const { workflowName, projectName, remainingMessage } = invocation;
 
@@ -1470,7 +1491,7 @@ async function handleWorkflowRunCommand(
   workflow: WorkflowDefinition,
   userMessage: string,
   isolationHints?: HandleMessageContext['isolationHints'],
-  workflowExecution?: HandleMessageContext['workflowExecution']
+  workflowExecution?: WorkflowExecutionOptions
 ): Promise<void> {
   // Check if conversation has a project
   if (conversation.codebase_id) {

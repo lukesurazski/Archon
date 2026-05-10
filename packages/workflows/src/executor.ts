@@ -8,7 +8,12 @@ import type { WorkflowDeps, WorkflowConfig } from './deps';
 import * as archonPaths from '@archon/paths';
 import { createLogger, captureWorkflowInvoked, BUNDLED_VERSION } from '@archon/paths';
 import { getDefaultBranch, toRepoPath } from '@archon/git';
-import type { WorkflowDefinition, WorkflowRun, WorkflowExecutionResult } from './schemas';
+import type {
+  WorkflowDefinition,
+  WorkflowRun,
+  WorkflowExecutionResult,
+  WorkflowExecutionOptions,
+} from './schemas';
 import { executeDagWorkflow } from './dag-executor';
 import { logWorkflowStart, logWorkflowError } from './logger';
 import { formatDuration, parseDbTimestamp } from './utils/duration';
@@ -245,14 +250,7 @@ export async function executeWorkflow(
   },
   parentConversationId?: string,
   preCreatedRun?: WorkflowRun,
-  options?: {
-    /**
-     * Skip DAG auto-resume and force creation/use of a separate workflow run.
-     * Used by UI "Run again" so a prior failed/paused run is not mutated back
-     * to running when the user explicitly wants another execution.
-     */
-    forceFresh?: boolean;
-  }
+  options?: WorkflowExecutionOptions
 ): Promise<WorkflowExecutionResult> {
   // Load config once for the entire workflow execution
   const fileConfig = await deps.loadConfig(cwd);

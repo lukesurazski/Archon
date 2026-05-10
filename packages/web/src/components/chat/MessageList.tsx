@@ -129,18 +129,25 @@ function WorkflowResultCard({
   });
 
   // Merge: prefer the terminal REST record (immutable) over the in-memory live state.
-  // Once `restRun` exists it is the source of truth; missing data must NOT fall back to
-  // a successful 'completed' status, otherwise a fetch error renders as a successful run.
+  // For non-terminal `restRun` snapshots we MUST fall back to `liveState` — the query is
+  // cached with `staleTime: Infinity`, so a `running`/`pending` snapshot would otherwise
+  // shadow fresher SSE updates flowing into the Zustand store.
   const restRun = runData?.run;
   const restEvents = runData?.events ?? [];
-  const status = restRun?.status ?? liveState?.status;
+  const terminalRestRun =
+    restRun?.status === 'completed' ||
+    restRun?.status === 'failed' ||
+    restRun?.status === 'cancelled'
+      ? restRun
+      : undefined;
+  const status = terminalRestRun?.status ?? liveState?.status;
   const dagNodes = liveState?.dagNodes ?? [];
   const storeArtifacts = liveState?.artifacts ?? [];
-  const startedAt = restRun?.started_at
-    ? new Date(ensureUtc(restRun.started_at)).getTime()
+  const startedAt = terminalRestRun?.started_at
+    ? new Date(ensureUtc(terminalRestRun.started_at)).getTime()
     : (liveState?.startedAt ?? null);
-  const completedAt = restRun?.completed_at
-    ? new Date(ensureUtc(restRun.completed_at)).getTime()
+  const completedAt = terminalRestRun?.completed_at
+    ? new Date(ensureUtc(terminalRestRun.completed_at)).getTime()
     : (liveState?.completedAt ?? null);
   const duration = startedAt != null && completedAt != null ? completedAt - startedAt : null;
 
