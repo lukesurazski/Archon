@@ -7,11 +7,12 @@ import type {
   WorkflowArtifactEvent,
   WorkflowDispatchEvent,
   WorkflowOutputPreviewEvent,
+  WorkflowToolActivityEvent,
   DagNodeEvent,
 } from '@/lib/types';
 import { SSE_BASE_URL } from '@/lib/api';
 
-function parseSSEEvent(raw: string): SSEEvent | null {
+export function parseSSEEvent(raw: string): SSEEvent | null {
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     if (!parsed || typeof parsed.type !== 'string') {
@@ -28,7 +29,7 @@ function parseSSEEvent(raw: string): SSEEvent | null {
   }
 }
 
-interface SSEHandlers {
+export interface SSEHandlers {
   onText: (content: string, workflowResult?: { workflowName: string; runId: string }) => void;
   onToolCall: (name: string, input: Record<string, unknown>, toolCallId?: string) => void;
   onToolResult: (name: string, output: string, duration: number, toolCallId?: string) => void;
@@ -39,11 +40,114 @@ interface SSEHandlers {
   onWorkflowArtifact?: (event: WorkflowArtifactEvent) => void;
   onDagNode?: (event: DagNodeEvent) => void;
   onLoopIteration?: (event: LoopIterationEvent) => void;
+  onToolActivity?: (event: WorkflowToolActivityEvent) => void;
   onWorkflowDispatch?: (event: WorkflowDispatchEvent) => void;
   onWorkflowOutputPreview?: (event: WorkflowOutputPreviewEvent) => void;
   onWarning?: (message: string) => void;
   onRetract?: () => void;
   onSystemStatus?: (content: string) => void;
+}
+
+/**
+ * Buffer operations passed into `dispatchSSEEvent`. Encapsulates the text-batching
+ * primitives owned by `useSSE` so the dispatcher itself can be unit-tested without
+ * mounting React or simulating timers.
+ */
+export interface SSEBufferOps {
+  /** Append text content to the buffer; debounced flush is owned by the caller. */
+  appendText: (content: string, workflowResult?: { workflowName: string; runId: string }) => void;
+  /** Synchronously flush any buffered text. No-op if the buffer is empty. */
+  flushIfPending: () => void;
+  /** Discard buffered text and any pending workflow-result pointer without flushing. */
+  clearBuffer: () => void;
+}
+
+/**
+ * Pure dispatcher for parsed SSE events. The hook holds the `SSEBufferOps` (text
+ * batching state lives in refs), but the event-routing switch is extracted here
+ * so individual branches — including `workflow_tool_activity` — can be exercised
+ * directly in unit tests.
+ */
+export function dispatchSSEEvent(
+  data: SSEEvent,
+  handlers: SSEHandlers,
+  buffer: SSEBufferOps
+): void {
+  switch (data.type) {
+    case 'text': {
+      const workflowResult =
+        'workflowResult' in data && data.workflowResult && typeof data.workflowResult === 'object'
+          ? (data.workflowResult as { workflowName: string; runId: string })
+          : undefined;
+      buffer.appendText(data.content, workflowResult);
+      break;
+    }
+    case 'tool_call':
+      buffer.flushIfPending();
+      handlers.onToolCall(data.name, data.input, data.toolCallId);
+      break;
+    case 'tool_result':
+      buffer.flushIfPending();
+      handlers.onToolResult(data.name, data.output, data.duration, data.toolCallId);
+      break;
+    case 'error':
+      handlers.onError({
+        message: data.message,
+        classification: data.classification ?? 'transient',
+        suggestedActions: data.suggestedActions ?? [],
+      });
+      break;
+    case 'conversation_lock':
+      if (!data.locked) {
+        buffer.flushIfPending();
+      }
+      handlers.onLockChange(data.locked, data.queuePosition);
+      break;
+    case 'session_info':
+      handlers.onSessionInfo(data.sessionId, data.cost);
+      break;
+    case 'workflow_status':
+      handlers.onWorkflowStatus?.(data);
+      if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {
+        handlers.onLockChange(false);
+      }
+      break;
+    case 'workflow_artifact':
+      handlers.onWorkflowArtifact?.(data);
+      break;
+    case 'dag_node':
+      handlers.onDagNode?.(data);
+      break;
+    case 'workflow_step':
+      handlers.onLoopIteration?.(data);
+      break;
+    case 'workflow_dispatch':
+      buffer.flushIfPending();
+      handlers.onWorkflowDispatch?.(data);
+      break;
+    case 'workflow_output_preview':
+      handlers.onWorkflowOutputPreview?.(data);
+      break;
+    case 'workflow_tool_activity':
+      handlers.onToolActivity?.(data);
+      break;
+    case 'warning':
+      handlers.onWarning?.(data.message);
+      break;
+    case 'system_status':
+      handlers.onSystemStatus?.(data.content);
+      break;
+    case 'retract':
+      buffer.clearBuffer();
+      handlers.onRetract?.();
+      break;
+    case 'heartbeat':
+      break;
+    default: {
+      console.warn('[SSE] Unknown event type', { type: (data as { type: string }).type });
+      break;
+    }
+  }
 }
 
 export function useSSE(
@@ -110,26 +214,17 @@ export function useSSE(
       try {
         const h = handlersRef.current;
 
-        switch (data.type) {
-          case 'text':
-            textBufferRef.current += data.content;
-            if (
-              'workflowResult' in data &&
-              data.workflowResult &&
-              typeof data.workflowResult === 'object'
-            ) {
-              pendingWorkflowResultRef.current = data.workflowResult as {
-                workflowName: string;
-                runId: string;
-              };
+        const buffer: SSEBufferOps = {
+          appendText: (content, workflowResult) => {
+            textBufferRef.current += content;
+            if (workflowResult) {
+              pendingWorkflowResultRef.current = workflowResult;
             }
             if (!flushTimerRef.current) {
               flushTimerRef.current = setTimeout(flushText, 50);
             }
-            break;
-          case 'tool_call':
-            // Flush buffered text before tool events to ensure text
-            // attaches to the correct message (not the previous one)
+          },
+          flushIfPending: () => {
             if (textBufferRef.current) {
               if (flushTimerRef.current) {
                 clearTimeout(flushTimerRef.current);
@@ -137,100 +232,18 @@ export function useSSE(
               }
               flushText();
             }
-            h.onToolCall(data.name, data.input, data.toolCallId);
-            break;
-          case 'tool_result':
-            // Flush buffered text before tool result too
-            if (textBufferRef.current) {
-              if (flushTimerRef.current) {
-                clearTimeout(flushTimerRef.current);
-                flushTimerRef.current = null;
-              }
-              flushText();
-            }
-            h.onToolResult(data.name, data.output, data.duration, data.toolCallId);
-            break;
-          case 'error':
-            h.onError({
-              message: data.message,
-              classification: data.classification ?? 'transient',
-              suggestedActions: data.suggestedActions ?? [],
-            });
-            break;
-          case 'conversation_lock':
-            // Flush any buffered text before processing lock change,
-            // otherwise text arriving just before lock release creates
-            // a streaming message that never gets cleared.
-            if (!data.locked && textBufferRef.current) {
-              if (flushTimerRef.current) {
-                clearTimeout(flushTimerRef.current);
-                flushTimerRef.current = null;
-              }
-              flushText();
-            }
-            h.onLockChange(data.locked, data.queuePosition);
-            break;
-          case 'session_info':
-            h.onSessionInfo(data.sessionId, data.cost);
-            break;
-          case 'workflow_status':
-            h.onWorkflowStatus?.(data);
-            if (
-              data.status === 'completed' ||
-              data.status === 'failed' ||
-              data.status === 'cancelled'
-            ) {
-              h.onLockChange(false);
-            }
-            break;
-          case 'workflow_artifact':
-            h.onWorkflowArtifact?.(data);
-            break;
-          case 'dag_node':
-            h.onDagNode?.(data);
-            break;
-          case 'workflow_step':
-            h.onLoopIteration?.(data);
-            break;
-          case 'workflow_dispatch':
-            // Flush buffered text before dispatch events to ensure the dispatch
-            // message (🚀) is committed as an assistant message before
-            // onWorkflowDispatch attaches metadata to the "last assistant message".
-            if (textBufferRef.current) {
-              if (flushTimerRef.current) {
-                clearTimeout(flushTimerRef.current);
-                flushTimerRef.current = null;
-              }
-              flushText();
-            }
-            h.onWorkflowDispatch?.(data);
-            break;
-          case 'workflow_output_preview':
-            h.onWorkflowOutputPreview?.(data);
-            break;
-          case 'warning':
-            h.onWarning?.(data.message);
-            break;
-          case 'system_status':
-            h.onSystemStatus?.(data.content);
-            break;
-          case 'retract':
-            // Discard any buffered text (don't flush to UI)
+          },
+          clearBuffer: () => {
             if (flushTimerRef.current) {
               clearTimeout(flushTimerRef.current);
               flushTimerRef.current = null;
             }
             textBufferRef.current = '';
             pendingWorkflowResultRef.current = undefined;
-            h.onRetract?.();
-            break;
-          case 'heartbeat':
-            break;
-          default: {
-            console.warn('[SSE] Unknown event type', { type: (data as { type: string }).type });
-            break;
-          }
-        }
+          },
+        };
+
+        dispatchSSEEvent(data, h, buffer);
       } catch (handlerError) {
         console.error('[SSE] Handler error for event type:', data.type, handlerError);
         try {

@@ -8,7 +8,12 @@ import type { WorkflowDeps, WorkflowConfig } from './deps';
 import * as archonPaths from '@archon/paths';
 import { createLogger, captureWorkflowInvoked, BUNDLED_VERSION } from '@archon/paths';
 import { getDefaultBranch, toRepoPath } from '@archon/git';
-import type { WorkflowDefinition, WorkflowRun, WorkflowExecutionResult } from './schemas';
+import type {
+  WorkflowDefinition,
+  WorkflowRun,
+  WorkflowExecutionResult,
+  WorkflowExecutionOptions,
+} from './schemas';
 import { executeDagWorkflow } from './dag-executor';
 import { logWorkflowStart, logWorkflowError } from './logger';
 import { formatDuration, parseDbTimestamp } from './utils/duration';
@@ -244,7 +249,8 @@ export async function executeWorkflow(
     prBranch?: string;
   },
   parentConversationId?: string,
-  preCreatedRun?: WorkflowRun
+  preCreatedRun?: WorkflowRun,
+  options?: WorkflowExecutionOptions
 ): Promise<WorkflowExecutionResult> {
   // Load config once for the entire workflow execution
   const fileConfig = await deps.loadConfig(cwd);
@@ -310,8 +316,10 @@ export async function executeWorkflow(
   let dagPriorCompletedNodes: Map<string, string> | undefined;
   let workflowRun: WorkflowRun | undefined = preCreatedRun;
 
-  // Resume detection: check for prior failed run on same workflow + worktree
-  {
+  // Resume detection: check for prior failed run on same workflow + worktree.
+  // Some entrypoints (notably UI "Run again") explicitly request a separate
+  // execution, so skip auto-resume for those calls.
+  if (!options?.forceFresh) {
     // Step 1: Find prior failed run — non-critical, fall through on DB error
     let resumableRun: Awaited<ReturnType<typeof deps.store.findResumableRun>> = null;
     try {

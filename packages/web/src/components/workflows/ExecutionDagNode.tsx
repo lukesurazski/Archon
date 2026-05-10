@@ -42,10 +42,12 @@ const TYPE_LABELS: Record<string, string> = {
 function ExecutionDagNodeRender({ data }: NodeProps<ExecutionFlowNode>): React.ReactElement {
   const style = (data.status && STATUS_STYLES[data.status]) ?? DEFAULT_STYLE;
   const typeLabel = TYPE_LABELS[data.nodeType] ?? 'PROMPT';
+  const preview = data.contentPreview;
 
   return (
     <div
-      className={`rounded-lg border border-border px-3 py-2 min-w-[140px] transition-all duration-300 ${style}${data.selected ? ' ring-2 ring-accent-bright' : ''}`}
+      className={`rounded-lg border border-border px-3 py-2 w-[220px] transition-all duration-300 ${style}${data.selected ? ' ring-2 ring-accent-bright' : ''}`}
+      title={preview ? `${data.label}\n${preview}` : data.label}
     >
       <Handle type="target" position={Position.Top} className="!bg-border !w-2 !h-2" />
       <div className="flex items-center gap-2">
@@ -55,7 +57,7 @@ function ExecutionDagNodeRender({ data }: NodeProps<ExecutionFlowNode>): React.R
         >
           {typeLabel}
         </span>
-        <span className="text-xs font-medium text-text-primary truncate max-w-[100px]">
+        <span className="text-xs font-medium text-text-primary truncate min-w-0 flex-1">
           {data.label}
         </span>
         {data.duration !== undefined && (
@@ -64,6 +66,9 @@ function ExecutionDagNodeRender({ data }: NodeProps<ExecutionFlowNode>): React.R
           </span>
         )}
       </div>
+      {preview && preview !== data.label && (
+        <div className="text-[10px] text-text-tertiary mt-1 truncate">{preview}</div>
+      )}
       {data.currentIteration !== undefined && data.maxIterations !== undefined && (
         <div className="text-[10px] text-text-tertiary mt-0.5">
           {data.currentIteration}/{data.maxIterations} iterations

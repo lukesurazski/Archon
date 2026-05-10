@@ -45,11 +45,20 @@ export interface AttachedFile {
   size: number;
 }
 
+/**
+ * Per-execution controls passed through orchestrator → executor that do not affect
+ * isolation selection. Re-exported from `@archon/workflows` so the contract stays
+ * aligned across layers (HandleMessageContext, background dispatch, executor entry).
+ */
+export type { WorkflowExecutionOptions } from '@archon/workflows/schemas/workflow-run';
+import type { WorkflowExecutionOptions } from '@archon/workflows/schemas/workflow-run';
+
 export interface HandleMessageContext {
   readonly issueContext?: string;
   readonly threadContext?: string;
   readonly parentConversationId?: string;
   readonly isolationHints?: IsolationHints;
+  readonly workflowExecution?: WorkflowExecutionOptions;
   readonly attachedFiles?: AttachedFile[];
 }
 

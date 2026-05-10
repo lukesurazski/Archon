@@ -7,8 +7,16 @@ import { ConversationItem } from '@/components/conversations/ConversationItem';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import { useProject } from '@/contexts/ProjectContext';
-import { listConversations, listWorkflowRuns, addCodebase, getCodebaseInput } from '@/lib/api';
-import type { CodebaseResponse } from '@/lib/api';
+import {
+  createConversation,
+  deleteConversation,
+  listConversations,
+  listWorkflowRuns,
+  runWorkflow,
+  addCodebase,
+  getCodebaseInput,
+} from '@/lib/api';
+import type { CodebaseResponse, ConversationResponse, WorkflowRunResponse } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 const PANEL_MIN = 220;
@@ -43,6 +51,12 @@ export function ChatPage(): React.ReactElement {
   const [addValue, setAddValue] = useState('');
   const [addLoading, setAddLoading] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
+  const [rerunningWorkflowRunId, setRerunningWorkflowRunId] = useState<string | null>(null);
+  const [rerunError, setRerunError] = useState<string | null>(null);
+  // Synchronous guard against double-rerun on rapid clicks. State updates are batched
+  // and won't reflect until the next render, so a closure check on rerunningWorkflowRunId
+  // can race; the ref flips immediately so the second click bails out.
+  const rerunningRef = useRef(false);
   const addInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -95,22 +109,25 @@ export function ChatPage(): React.ReactElement {
 
   const { data: runs } = useQuery({
     queryKey: ['workflow-runs-status'],
-    queryFn: () => listWorkflowRuns({ limit: 50 }),
+    queryFn: () => listWorkflowRuns({ limit: 200 }),
     refetchInterval: 10_000,
   });
 
-  const conversationStatusMap = useMemo((): Map<string, 'running' | 'failed'> => {
-    const map = new Map<string, 'running' | 'failed'>();
+  const latestWorkflowRunMap = useMemo((): Map<string, WorkflowRunResponse> => {
+    const map = new Map<string, WorkflowRunResponse>();
     if (!runs) return map;
-    for (const run of runs) {
+
+    const sortedRuns = [...runs].sort((a, b) => {
+      const aTime = new Date(a.started_at.endsWith('Z') ? a.started_at : `${a.started_at}Z`);
+      const bTime = new Date(b.started_at.endsWith('Z') ? b.started_at : `${b.started_at}Z`);
+      return bTime.getTime() - aTime.getTime();
+    });
+
+    for (const run of sortedRuns) {
       // For web runs, parent_conversation_id is the visible conversation in the sidebar.
       // For CLI runs, conversation_id is the only conversation (no parent/worker split).
       const key = run.parent_conversation_id ?? run.conversation_id;
-      if (run.status === 'running') {
-        map.set(key, 'running');
-      } else if (run.status === 'failed' && !map.has(key)) {
-        map.set(key, 'failed');
-      }
+      if (!map.has(key)) map.set(key, run);
     }
     return map;
   }, [runs]);
@@ -138,6 +155,54 @@ export function ChatPage(): React.ReactElement {
   const handleNewChat = useCallback((): void => {
     navigate('/chat');
   }, [navigate]);
+
+  const handleRerunWorkflow = useCallback(
+    (
+      run: { id: string; workflowName: string; userMessage: string; codebaseId: string | null },
+      _conversation: ConversationResponse
+    ): void => {
+      if (rerunningRef.current) return;
+      rerunningRef.current = true;
+
+      setRerunningWorkflowRunId(run.id);
+      setRerunError(null);
+
+      let newConversationId: string | undefined;
+      let workflowStarted = false;
+
+      void createConversation(run.codebaseId ?? undefined)
+        .then(({ conversationId }) => {
+          newConversationId = conversationId;
+          return runWorkflow(run.workflowName, conversationId, run.userMessage, {
+            forceFresh: true,
+          });
+        })
+        .then(() => {
+          workflowStarted = true;
+          void queryClient.invalidateQueries({ queryKey: ['workflow-runs-status'] });
+          void queryClient.invalidateQueries({ queryKey: ['conversations'] });
+          if (newConversationId) {
+            navigate(`/chat/${encodeURIComponent(newConversationId)}`);
+          }
+        })
+        .catch((err: unknown) => {
+          setRerunError(err instanceof Error ? err.message : 'Failed to run workflow again');
+          if (newConversationId !== undefined && !workflowStarted) {
+            void deleteConversation(newConversationId).catch((cleanupErr: unknown) => {
+              console.warn('[ChatPage] Failed to clean up failed workflow rerun conversation', {
+                conversationId: newConversationId,
+                error: cleanupErr instanceof Error ? cleanupErr.message : cleanupErr,
+              });
+            });
+          }
+        })
+        .finally(() => {
+          rerunningRef.current = false;
+          setRerunningWorkflowRunId(null);
+        });
+    },
+    [navigate, queryClient]
+  );
 
   const handleAddSubmit = useCallback((): void => {
     const trimmed = addValue.trim();
@@ -263,6 +328,12 @@ export function ChatPage(): React.ReactElement {
 
         <Separator className="bg-border" />
 
+        {rerunError && (
+          <div className="mx-3 mt-2 rounded-md border border-error/30 bg-error/10 px-2 py-1.5 text-[11px] text-error">
+            {rerunError}
+          </div>
+        )}
+
         {/* Search */}
         <div className="px-3 py-2">
           <div className="relative">
@@ -283,16 +354,36 @@ export function ChatPage(): React.ReactElement {
         <ScrollArea className="flex-1 min-h-0 px-2 pb-2">
           <div className="flex flex-col gap-0.5">
             {filtered && filtered.length > 0 ? (
-              filtered.map(conv => (
-                <ConversationItem
-                  key={conv.id}
-                  conversation={conv}
-                  projectName={
-                    conv.codebase_id ? codebaseMap.get(conv.codebase_id)?.name : undefined
-                  }
-                  status={conversationStatusMap.get(conv.id) ?? 'idle'}
-                />
-              ))
+              filtered.map(conv => {
+                // Workflow run conversation fields are internal DB IDs in /api/workflows/runs.
+                // Keep a platform-id fallback for compatibility if the API is enriched later.
+                const latestRun =
+                  latestWorkflowRunMap.get(conv.id) ??
+                  latestWorkflowRunMap.get(conv.platform_conversation_id);
+                return (
+                  <ConversationItem
+                    key={conv.id}
+                    conversation={conv}
+                    projectName={
+                      conv.codebase_id ? codebaseMap.get(conv.codebase_id)?.name : undefined
+                    }
+                    status={latestRun?.status ?? 'idle'}
+                    workflowRun={
+                      latestRun
+                        ? {
+                            id: latestRun.id,
+                            workflowName: latestRun.workflow_name,
+                            status: latestRun.status,
+                            userMessage: latestRun.user_message,
+                            codebaseId: latestRun.codebase_id,
+                          }
+                        : undefined
+                    }
+                    rerunningWorkflowRunId={rerunningWorkflowRunId}
+                    onRerunWorkflow={handleRerunWorkflow}
+                  />
+                );
+              })
             ) : (
               <div className="flex flex-col items-center justify-center gap-2 py-8 px-4">
                 <FolderGit2 className="h-8 w-8 text-text-tertiary" />

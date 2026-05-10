@@ -37,6 +37,7 @@ import {
   ConversationNotFoundError,
   isWebAdapter,
 } from '../types';
+import type { WorkflowExecutionOptions } from '../types';
 import type { IsolationHints, IsolationEnvironmentRow } from '@archon/isolation';
 import {
   IsolationBlockedError,
@@ -246,6 +247,10 @@ export interface WorkflowRoutingContext {
    * Hints for isolation environment (PR review context, etc.)
    */
   readonly isolationHints?: IsolationHints;
+  /**
+   * Workflow execution controls that do not affect isolation selection.
+   */
+  readonly workflowExecution?: WorkflowExecutionOptions;
 }
 
 /**
@@ -374,7 +379,8 @@ export async function dispatchBackgroundWorkflow(
           ctx.issueContext,
           isolationContext,
           ctx.conversationDbId,
-          preCreatedRun
+          preCreatedRun,
+          ctx.workflowExecution?.forceFresh ? { forceFresh: true } : undefined
         );
         // Surface workflow output to parent conversation as a result card
         if ('paused' in result) {

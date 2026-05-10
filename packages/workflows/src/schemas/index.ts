@@ -105,6 +105,7 @@ export type {
   WorkflowRun,
   ArtifactType,
   ApprovalContext,
+  WorkflowExecutionOptions,
 } from './workflow-run';
 
 // Result types (non-schema hand-written types)

@@ -14,8 +14,8 @@ import {
   getHealth,
   type DashboardCounts,
   type DashboardRunResponse,
+  type WorkflowRunStatus,
 } from '@/lib/api';
-import type { WorkflowRunStatus } from '@/lib/types';
 import { ensureUtc } from '@/lib/format';
 import { StatusSummaryBar } from '@/components/dashboard/StatusSummaryBar';
 import { WorkflowRunGroup } from '@/components/dashboard/WorkflowRunGroup';

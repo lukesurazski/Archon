@@ -3,11 +3,11 @@
  * Uses relative URLs - Vite proxy handles routing in dev.
  * SSE streams bypass the proxy in dev mode (Vite proxy buffers SSE responses).
  */
-import type { WorkflowRunStatus } from '@/lib/types';
 import type { components } from '@/lib/api.generated';
 
 export type WorkflowDefinition = components['schemas']['WorkflowDefinition'];
 export type DagNode = components['schemas']['DagNode'];
+export type WorkflowRunStatus = components['schemas']['WorkflowRunStatus'];
 
 /**
  * Base URL for SSE streams. In dev, bypasses Vite proxy by connecting directly
@@ -285,12 +285,13 @@ export async function listWorkflows(cwd?: string): Promise<WorkflowListEntry[]> 
 export async function runWorkflow(
   name: string,
   conversationId: string,
-  message: string
+  message: string,
+  options?: { forceFresh?: boolean }
 ): Promise<{ accepted: boolean; status: string }> {
   return fetchJSON(`/api/workflows/${encodeURIComponent(name)}/run`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ conversationId, message }),
+    body: JSON.stringify({ conversationId, message, forceFresh: options?.forceFresh }),
   });
 }
 

@@ -126,6 +126,20 @@ export interface ApprovalContext {
 }
 
 /**
+ * Per-execution controls passed through orchestrator → executor that do not affect
+ * isolation selection. Centralized here to keep the contract aligned across layers
+ * (`HandleMessageContext`, background dispatch, executor entry point).
+ */
+export interface WorkflowExecutionOptions {
+  /**
+   * Skip DAG auto-resume and force creation/use of a separate workflow run.
+   * Used by UI "Run again" so a prior failed/paused run is not mutated back
+   * to running when the user explicitly wants another execution.
+   */
+  readonly forceFresh?: boolean;
+}
+
+/**
  * Type guard for ApprovalContext.
  * Validates that the value is an object with the required nodeId and message fields.
  * Use before accessing `workflowRun.metadata.approval` to prevent runtime throws on

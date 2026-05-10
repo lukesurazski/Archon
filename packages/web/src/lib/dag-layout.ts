@@ -3,7 +3,7 @@ import dagre from '@dagrejs/dagre';
 import type { DagNode } from '@/lib/api';
 import type { DagFlowNode } from '@/components/workflows/DagNodeComponent';
 
-export const NODE_WIDTH = 180;
+export const NODE_WIDTH = 220;
 export const NODE_HEIGHT = 80;
 
 export function layoutWithDagre(
@@ -49,23 +49,58 @@ export function resolveNodeDisplay(dn: DagNode): {
   promptText?: string;
   bashScript?: string;
   bashTimeout?: number;
+  contentPreview?: string;
 } {
   if ('bash' in dn && dn.bash) {
+    const preview = firstMeaningfulLine(dn.bash, { skipHashComments: true });
     return {
-      label: 'Shell',
+      label: meaningfulNodeLabel(dn.id, preview, 'Shell'),
       nodeType: 'bash',
       bashScript: dn.bash,
       bashTimeout: dn.timeout,
+      contentPreview: preview,
     };
   }
   if ('command' in dn && dn.command) {
-    return { label: dn.command, nodeType: 'command' };
+    return { label: dn.command, nodeType: 'command', contentPreview: humanizeNodeId(dn.id) };
   }
+  const preview = firstMeaningfulLine(dn.prompt ?? '', { skipHashComments: false });
   return {
-    label: 'Prompt',
+    label: meaningfulNodeLabel(dn.id, preview, 'Prompt'),
     nodeType: 'prompt',
     promptText: dn.prompt,
+    contentPreview: preview,
   };
+}
+
+function meaningfulNodeLabel(id: string, contentPreview: string, fallback: string): string {
+  const humanized = humanizeNodeId(id);
+  if (humanized && !isGenericNodeId(id)) return humanized;
+  return contentPreview || fallback;
+}
+
+function humanizeNodeId(id: string): string {
+  return id
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, char => char.toUpperCase());
+}
+
+function isGenericNodeId(id: string): boolean {
+  return /^(node|step|bash|shell|prompt)(?:[-_\s]?\d+)?$/i.test(id.trim());
+}
+
+function firstMeaningfulLine(
+  value: string,
+  options: { skipHashComments: boolean } = { skipHashComments: true }
+): string {
+  const line =
+    value
+      .split('\n')
+      .map(part => part.trim())
+      .find(part => part.length > 0 && (!options.skipHashComments || !part.startsWith('#'))) ?? '';
+  return line.replace(/\s+/g, ' ');
 }
 
 export function dagNodesToReactFlow(dagNodes: readonly DagNode[]): {
@@ -76,6 +111,10 @@ export function dagNodesToReactFlow(dagNodes: readonly DagNode[]): {
     id: dn.id,
     type: 'dagNode',
     position: { x: 0, y: i * 100 },
+    width: NODE_WIDTH,
+    height: NODE_HEIGHT,
+    initialWidth: NODE_WIDTH,
+    initialHeight: NODE_HEIGHT,
     data: {
       ...dn,
       ...resolveNodeDisplay(dn),

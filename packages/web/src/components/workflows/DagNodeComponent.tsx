@@ -11,6 +11,7 @@ export interface DagNodeData extends DagNode {
   promptText?: string;
   bashScript?: string;
   bashTimeout?: number;
+  contentPreview?: string;
   /** Required by React Flow's Node<T> constraint — do not rely on this for typed access. */
   [key: string]: unknown;
 }
@@ -39,6 +40,7 @@ const TYPE_CONFIG = {
 } as const;
 
 function getContentPreview(data: DagNodeData): string {
+  if (data.contentPreview) return data.contentPreview;
   switch (data.nodeType) {
     case 'command':
       return data.label;
