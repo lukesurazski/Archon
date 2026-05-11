@@ -317,7 +317,7 @@ export async function findResumableRun(
        WHERE workflow_name = $1
          AND working_path = $2
          AND (
-           status IN ('failed', 'paused')
+           status IN ('failed', 'cancelled', 'paused')
            OR (status = 'running' AND (last_activity_at IS NULL OR last_activity_at < ${dialect.nowMinusDays(3)}))
          )
        ORDER BY started_at DESC

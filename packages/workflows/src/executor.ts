@@ -14,7 +14,7 @@ import type {
   WorkflowExecutionResult,
   WorkflowExecutionOptions,
 } from './schemas';
-import { executeDagWorkflow } from './dag-executor';
+import { buildTopologicalLayers, executeDagWorkflow } from './dag-executor';
 import { logWorkflowStart, logWorkflowError } from './logger';
 import { formatDuration, parseDbTimestamp } from './utils/duration';
 import { getWorkflowEventEmitter } from './event-emitter';
@@ -316,6 +316,37 @@ export async function executeWorkflow(
   let dagPriorCompletedNodes: Map<string, string> | undefined;
   let workflowRun: WorkflowRun | undefined = preCreatedRun;
 
+  function getResumeFromStep(run: WorkflowRun): string | undefined {
+    const value = run.metadata?.resume_from_step;
+    return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+  }
+
+  function filterCheckpointsBeforeStep(
+    priorNodes: Map<string, string>,
+    resumeFromStep: string,
+    nodes: WorkflowDefinition['nodes']
+  ): Map<string, string> {
+    const targetIndex = nodes.findIndex(node => node.id === resumeFromStep);
+    if (targetIndex === -1) {
+      throw new Error(`Workflow '${workflow.name}' does not contain step '${resumeFromStep}'`);
+    }
+    const layers = buildTopologicalLayers(nodes);
+    const targetLayerIndex = layers.findIndex(layer =>
+      layer.some(node => node.id === resumeFromStep)
+    );
+    const checkpointNodeIds = layers
+      .slice(0, targetLayerIndex)
+      .flatMap(layer => layer.map(node => node.id));
+    const allowedNodeIds = new Set(checkpointNodeIds);
+    const filtered = new Map<string, string>();
+    for (const [nodeId, output] of priorNodes) {
+      if (allowedNodeIds.has(nodeId)) {
+        filtered.set(nodeId, output);
+      }
+    }
+    return filtered;
+  }
+
   // Resume detection: check for prior failed run on same workflow + worktree.
   // Some entrypoints (notably UI "Run again") explicitly request a separate
   // execution, so skip auto-resume for those calls.
@@ -365,12 +396,40 @@ export async function executeWorkflow(
           '⚠️ Could not load prior node outputs for resume (database error). Starting a fresh run instead.'
         );
       }
+      const resumeFromStep = getResumeFromStep(resumableRun);
+      if (resumeFromStep) {
+        try {
+          priorNodes = filterCheckpointsBeforeStep(priorNodes, resumeFromStep, workflow.nodes);
+        } catch (error) {
+          const err = error as Error;
+          getLog().error(
+            { err, workflowName: workflow.name, resumableRunId: resumableRun.id, resumeFromStep },
+            'workflow.resume_from_step_invalid'
+          );
+          if (preCreatedRun) {
+            await deps.store
+              .updateWorkflowRun(preCreatedRun.id, { status: 'cancelled' })
+              .catch((cleanupErr: Error) => {
+                getLog().warn(
+                  { err: cleanupErr, preCreatedRunId: preCreatedRun.id },
+                  'workflow.resume_from_step_invalid_cleanup_failed'
+                );
+              });
+          }
+          await sendCriticalMessage(
+            platform,
+            conversationId,
+            `❌ **Workflow failed**: Cannot resume from step \`${resumeFromStep}\` because that step is not in workflow \`${workflow.name}\`.`
+          );
+          return { success: false, error: err.message };
+        }
+      }
       // Resume if there are completed nodes OR if the run has interactive loop state
       // (a paused interactive loop may have no completed nodes yet — just the loop itself pausing)
       const hasInteractiveLoopState =
         resumableRun.metadata?.approval &&
         (resumableRun.metadata.approval as Record<string, unknown>).type === 'interactive_loop';
-      if (priorNodes.size > 0 || hasInteractiveLoopState) {
+      if (priorNodes.size > 0 || hasInteractiveLoopState || resumeFromStep) {
         try {
           // Capture the orphan BEFORE replacing workflowRun. The orchestrator's
           // pre-created row was a lock-token claim on this path; once resume
@@ -404,11 +463,13 @@ export async function executeWorkflow(
             {
               workflowRunId: workflowRun.id,
               priorCompletedCount: priorNodes.size,
+              resumeFromStep,
             },
             'workflow.dag_resuming'
           );
-          const resumeMsg =
-            priorNodes.size > 0
+          const resumeMsg = resumeFromStep
+            ? `▶️ **Resuming** workflow \`${workflow.name}\` from step \`${resumeFromStep}\` — using ${String(priorNodes.size)} checkpointed node(s).\n\nNote: AI session context from prior nodes is not restored. Nodes that depend on prior context may need to re-read artifacts.`
+            : priorNodes.size > 0
               ? `▶️ **Resuming** workflow \`${workflow.name}\` — skipping ${String(priorNodes.size)} already-completed node(s).\n\nNote: AI session context from prior nodes is not restored. Nodes that depend on prior context may need to re-read artifacts.`
               : `▶️ **Resuming** workflow \`${workflow.name}\` — continuing interactive loop.`;
           await safeSendMessage(platform, conversationId, resumeMsg);

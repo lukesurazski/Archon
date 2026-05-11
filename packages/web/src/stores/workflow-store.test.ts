@@ -201,7 +201,7 @@ describe('handleWorkflowStatus — approval field', () => {
 });
 
 describe('handleWorkflowStatus — terminal guard', () => {
-  test('does not allow running SSE event to resurrect a completed workflow', () => {
+  test('does not allow older running SSE event to resurrect a completed workflow', () => {
     useWorkflowStore
       .getState()
       .handleWorkflowStatus(
@@ -209,9 +209,25 @@ describe('handleWorkflowStatus — terminal guard', () => {
       );
     useWorkflowStore
       .getState()
-      .handleWorkflowStatus(statusEvent({ runId: 'run-tg1', status: 'running', timestamp: 3000 }));
+      .handleWorkflowStatus(statusEvent({ runId: 'run-tg1', status: 'running', timestamp: 1500 }));
     const wf = useWorkflowStore.getState().workflows.get('run-tg1');
     expect(wf!.status).toBe('completed');
+  });
+
+  test('allows newer running SSE event to restart a completed workflow', () => {
+    useWorkflowStore
+      .getState()
+      .handleWorkflowStatus(
+        statusEvent({ runId: 'run-tg-resume', status: 'completed', timestamp: 2000 })
+      );
+    useWorkflowStore
+      .getState()
+      .handleWorkflowStatus(
+        statusEvent({ runId: 'run-tg-resume', status: 'running', timestamp: 3000 })
+      );
+    const wf = useWorkflowStore.getState().workflows.get('run-tg-resume');
+    expect(wf!.status).toBe('running');
+    expect(wf!.completedAt).toBeUndefined();
   });
 
   test('does not set completedAt when status is running on existing entry', () => {

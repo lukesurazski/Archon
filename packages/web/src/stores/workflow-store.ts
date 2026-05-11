@@ -197,8 +197,16 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
                 currentTool: null,
               });
             } else {
-              // Don't allow a late/replayed SSE event to resurrect a terminal workflow
-              if (isTerminalStatus(existing.status) && event.status === 'running') {
+              // Don't allow a late/replayed SSE event to resurrect a terminal workflow.
+              // A resumed run reuses the same run id; its fresh running event has a
+              // timestamp after the prior terminal timestamp, so let that transition
+              // through.
+              if (
+                isTerminalStatus(existing.status) &&
+                event.status === 'running' &&
+                existing.completedAt !== undefined &&
+                event.timestamp <= existing.completedAt
+              ) {
                 return state;
               }
               next.set(event.runId, {

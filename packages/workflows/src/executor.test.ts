@@ -36,6 +36,7 @@ mock.module('@archon/git', () => ({
 const mockExecuteDagWorkflow = mock(async (): Promise<string | undefined> => undefined);
 mock.module('./dag-executor', () => ({
   executeDagWorkflow: mockExecuteDagWorkflow,
+  buildTopologicalLayers: (nodes: WorkflowDefinition['nodes']) => nodes.map(node => [node]),
 }));
 
 // --- Mock logger functions ---
@@ -664,6 +665,82 @@ describe('executeWorkflow', () => {
       );
       expect(result.success).toBe(false);
       expect(result.error).toContain('Database error resuming');
+    });
+
+    it('filters checkpointed nodes before the requested resume step', async () => {
+      const failedRun = makeRun({
+        id: 'prior-run',
+        status: 'failed',
+        metadata: { resume_from_step: 'node2' },
+      });
+      const priorNodes = new Map([
+        ['node1', 'output1'],
+        ['node2', 'output2'],
+        ['node3', 'output3'],
+      ]);
+      const resumedRun = makeRun({ id: 'prior-run', status: 'running' });
+      const store = makeStore({
+        findResumableRun: mock(async () => failedRun),
+        getCompletedDagNodeOutputs: mock(async () => priorNodes),
+        resumeWorkflowRun: mock(async () => resumedRun),
+        getWorkflowRun: mock(async () => ({ ...resumedRun, status: 'completed' as const })),
+      });
+      const deps = makeDeps(store);
+
+      const result = await executeWorkflow(
+        deps,
+        makePlatform(),
+        'conv-1',
+        '/tmp',
+        makeWorkflow({
+          nodes: [
+            { id: 'node1', prompt: 'Step 1' },
+            { id: 'node2', prompt: 'Step 2', depends_on: ['node1'] },
+            { id: 'node3', prompt: 'Step 3', depends_on: ['node2'] },
+          ],
+        }),
+        'test message',
+        'db-conv-1'
+      );
+
+      expect(result.success).toBe(true);
+      expect(store.resumeWorkflowRun).toHaveBeenCalledWith('prior-run');
+      const passedPriorNodes = mockExecuteDagWorkflow.mock.calls[0]?.[15] as
+        | Map<string, string>
+        | undefined;
+      expect([...(passedPriorNodes?.entries() ?? [])]).toEqual([['node1', 'output1']]);
+    });
+
+    it('resumes from the first step even when no checkpoints are reused', async () => {
+      const cancelledRun = makeRun({
+        id: 'prior-run',
+        status: 'cancelled',
+        metadata: { resume_from_step: 'node1' },
+      });
+      const resumedRun = makeRun({ id: 'prior-run', status: 'running' });
+      const store = makeStore({
+        findResumableRun: mock(async () => cancelledRun),
+        getCompletedDagNodeOutputs: mock(async () => new Map([['node1', 'old-output']])),
+        resumeWorkflowRun: mock(async () => resumedRun),
+        getWorkflowRun: mock(async () => ({ ...resumedRun, status: 'completed' as const })),
+      });
+      const deps = makeDeps(store);
+
+      await executeWorkflow(
+        deps,
+        makePlatform(),
+        'conv-1',
+        '/tmp',
+        makeWorkflow(),
+        'test message',
+        'db-conv-1'
+      );
+
+      expect(store.resumeWorkflowRun).toHaveBeenCalledWith('prior-run');
+      const passedPriorNodes = mockExecuteDagWorkflow.mock.calls[0]?.[15] as
+        | Map<string, string>
+        | undefined;
+      expect(passedPriorNodes?.size).toBe(0);
     });
   });
 
