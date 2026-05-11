@@ -376,6 +376,12 @@ export async function dispatchBackgroundWorkflow(
     task_id: parentConversation.task_id ?? null,
     hidden: true,
   });
+  const workerConversation = {
+    ...workerConv,
+    cwd: ctx.cwd,
+    codebase_id: ctx.codebaseId ?? null,
+    task_id: parentConversation.task_id ?? null,
+  };
 
   // 3. Resolve isolation for this worker (each background workflow gets its own worktree).
   // Isolation failure is fatal — never run a workflow in a shared/parent worktree.
@@ -388,7 +394,7 @@ export async function dispatchBackgroundWorkflow(
       );
     }
     const result = await validateAndResolveIsolation(
-      workerConv,
+      workerConversation,
       codebase,
       ctx.platform,
       workerPlatformId,

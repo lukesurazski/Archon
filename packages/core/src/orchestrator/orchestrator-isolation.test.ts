@@ -456,4 +456,47 @@ describe('dispatchBackgroundWorkflow', () => {
       cwd: '/workspace/feat-task-container-workspace',
     });
   });
+
+  test('task PR rerun pre-creates a workflow run when the PR branch is checked out in the primary checkout', async () => {
+    mockGetCodebase.mockResolvedValueOnce(makeCodebase({ default_cwd: '/workspace/test-repo' }));
+    mockGetTask.mockResolvedValueOnce({
+      id: 'task-1',
+      branch_name: 'feat/task-container-workspace',
+      pr_url: 'https://github.com/lukesurazski/Archon/pull/4',
+      pr_number: null,
+    });
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: 'feat/task-container-workspace\n',
+      stderr: '',
+    });
+
+    await dispatchBackgroundWorkflow(
+      {
+        platform,
+        conversationId: 'parent-platform-conv',
+        conversationDbId: 'parent-conv-1',
+        cwd: '/workspace',
+        codebaseId: 'cb-1',
+        originalMessage: 'https://github.com/lukesurazski/Archon/pull/4',
+        isolationHints: { workflowType: 'thread', workflowId: 'parent-platform-conv' },
+        workflowExecution: { forceFresh: true },
+      },
+      { name: 'archon-respond-to-pr-feedback', description: 'Respond to PR feedback', steps: [] }
+    );
+
+    expect(mockResolve).not.toHaveBeenCalled();
+    expect(mockUpdateConversation).toHaveBeenCalledWith('worker-conv-1', {
+      cwd: '/workspace/test-repo',
+      isolation_env_id: null,
+    });
+    expect(mockCreateWorkflowRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workflow_name: 'archon-respond-to-pr-feedback',
+        conversation_id: 'worker-conv-1',
+        parent_conversation_id: 'parent-conv-1',
+        user_message: 'https://github.com/lukesurazski/Archon/pull/4',
+        working_path: '/workspace/test-repo',
+      })
+    );
+  });
 });
