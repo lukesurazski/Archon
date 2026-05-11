@@ -468,7 +468,7 @@ curl http://localhost:3090/api/conversations/$CONV_ID/messages
 # 1. Create a conversation scoped to a codebase
 CONV_ID=$(curl -s -X POST http://localhost:3090/api/conversations \
   -H "Content-Type: application/json" \
-  -d '{"codebase_id": "your-codebase-id"}' | jq -r '.platform_conversation_id')
+  -d '{"codebaseId": "your-codebase-id"}' | jq -r '.platform_conversation_id')
 
 # 2. Start the workflow
 curl -X POST http://localhost:3090/api/workflows/archon-assist/run \

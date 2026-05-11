@@ -57,7 +57,11 @@ if [ "$CURRENT_BRANCH" != "$HEAD_BRANCH" ]; then
   exit 1
 fi
 
-git pull --ff-only origin $HEAD_BRANCH
+if ! git pull --ff-only origin $HEAD_BRANCH; then
+  echo "FATAL: git pull --ff-only failed. Branch may have diverged."
+  echo "Manual intervention required: check worktree state."
+  exit 1
+fi
 ```
 
 ### 1.3 Read Consolidated Review

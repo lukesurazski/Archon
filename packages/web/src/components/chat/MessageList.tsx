@@ -137,7 +137,8 @@ function WorkflowResultCard({
   const terminalRestRun =
     restRun?.status === 'completed' ||
     restRun?.status === 'failed' ||
-    restRun?.status === 'cancelled'
+    restRun?.status === 'cancelled' ||
+    restRun?.status === 'blocked'
       ? restRun
       : undefined;
   const status = terminalRestRun?.status ?? liveState?.status;

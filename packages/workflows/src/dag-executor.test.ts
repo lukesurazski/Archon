@@ -2177,9 +2177,11 @@ describe('executeDagWorkflow -- provider tool safety', () => {
       join(outsideDir, 'src.ts')
     );
     expect(getDisallowedToolPath('Edit', { file_path: 'src.ts' }, testDir)).toBeNull();
+    // Read-only tools are subject to the same allowlist as mutating tools so a
+    // prompt-injected agent cannot Read arbitrary host files.
     expect(
       getDisallowedToolPath('Read', { file_path: join(outsideDir, 'artifact.md') }, testDir)
-    ).toBeNull();
+    ).toBe(join(outsideDir, 'artifact.md'));
     expect(
       getDisallowedToolPath('Write', { file_path: join(outsideDir, 'artifact.md') }, testDir, [
         outsideDir,

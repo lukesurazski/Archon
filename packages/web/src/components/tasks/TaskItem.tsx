@@ -112,7 +112,8 @@ export function TaskItem({
             e.stopPropagation();
             action(task);
           }}
-          className="absolute right-2 top-2 rounded p-1 text-text-tertiary opacity-0 transition-opacity hover:bg-surface-secondary hover:text-text-primary group-hover:opacity-100 focus:opacity-100"
+          aria-label={task.status === 'archived' ? 'Restore task' : 'Archive task'}
+          className="absolute right-2 top-2 rounded p-1 text-text-tertiary opacity-100 transition-opacity hover:bg-surface-secondary hover:text-text-primary md:opacity-0 md:pointer-events-none md:group-hover:opacity-100 md:group-hover:pointer-events-auto md:focus:opacity-100 md:focus:pointer-events-auto"
           title={task.status === 'archived' ? 'Restore task' : 'Archive task'}
         >
           {task.status === 'archived' ? (

@@ -225,3 +225,5 @@ assistants:
 - Use `c.req.text()` for raw body (needed for signature verification).
 - Return 200 immediately, process async.
 - @mention detection: parse `@archon` in issue/PR **comments only** (not descriptions). Event: `issue_comment` only. Descriptions often contain example commands or documentation — these are NOT command invocations (see #96).
+
+For the GitHub adapter's full event list and the secrets/env vars it consumes, see `packages/docs-web/src/content/docs/adapters/github.md` and the security reference in `packages/docs-web/src/content/docs/reference/security.md`.

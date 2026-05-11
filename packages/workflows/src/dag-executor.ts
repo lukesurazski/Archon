@@ -6,13 +6,15 @@
  * Captures all assistant output regardless of streaming mode for $node_id.output substitution.
  */
 import { readFile } from 'fs/promises';
+import { realpathSync } from 'fs';
 import {
+  basename as basenamePath,
   dirname as dirnamePath,
   isAbsolute,
   relative as relativePath,
   resolve as resolvePath,
 } from 'path';
-import { tmpdir } from 'os';
+import { homedir } from 'os';
 import { execFileAsync } from '@archon/git';
 import { discoverScriptsForCwd } from './script-discovery';
 import type {
@@ -178,10 +180,30 @@ async function* withProviderTimeouts(
   }
 }
 
+function canonicalizePath(path: string): string {
+  const resolved = resolvePath(path);
+  try {
+    return realpathSync(resolved);
+  } catch {
+    // Final component may not exist yet (about-to-be-written file). Resolve
+    // the closest existing ancestor so comparisons stay consistent across
+    // platform symlinks (e.g. macOS's `/var -> /private/var`).
+    const parent = dirnamePath(resolved);
+    if (parent !== resolved) {
+      try {
+        return resolvePath(realpathSync(parent), basenamePath(resolved));
+      } catch {
+        // Parent also missing; fall back to lexical.
+      }
+    }
+    return resolved;
+  }
+}
+
 function isPathInsideRoot(path: string, root: string): boolean {
-  const resolvedPath = resolvePath(path);
-  const resolvedRoot = resolvePath(root);
-  const rel = relativePath(resolvedRoot, resolvedPath);
+  const canonicalPath = canonicalizePath(path);
+  const canonicalRoot = canonicalizePath(root);
+  const rel = relativePath(canonicalRoot, canonicalPath);
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
@@ -222,8 +244,44 @@ function collectToolPaths(
   return paths;
 }
 
-function extractShellAbsolutePaths(command: string): string[] {
+function shouldIgnoreShellPath(path: string): boolean {
+  return (
+    path === '/dev/null' ||
+    path === '/dev/stdin' ||
+    path === '/dev/stdout' ||
+    path === '/dev/stderr' ||
+    path.startsWith('/bin/') ||
+    path.startsWith('/usr/bin/') ||
+    path.startsWith('/usr/local/bin/')
+  );
+}
+
+function looksLikeShellPath(token: string): boolean {
+  if (!token) return false;
+  // Absolute, explicit-relative (./ or ../), home-relative (~/), or contains a slash.
+  return (
+    token.startsWith('/') ||
+    token.startsWith('./') ||
+    token.startsWith('../') ||
+    token.startsWith('~/') ||
+    token.includes('/')
+  );
+}
+
+function tokenizeShellSegment(segment: string): string[] {
+  const tokens: string[] = [];
+  const tokenPattern = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = tokenPattern.exec(segment)) !== null) {
+    tokens.push(match[1] ?? match[2] ?? match[3] ?? '');
+  }
+  return tokens;
+}
+
+function extractShellPaths(command: string): string[] {
   const paths: string[] = [];
+  // Absolute paths matched in the wider command. The redirection/mutating-segment
+  // walks below pull additional relative-path targets that this regex misses.
   const absolutePathPattern = /(?:^|[\s"'=])((?:\/[A-Za-z0-9._~+-]+)+)/g;
   let match: RegExpExecArray | null;
   while ((match = absolutePathPattern.exec(command)) !== null) {
@@ -235,22 +293,13 @@ function extractShellAbsolutePaths(command: string): string[] {
   return paths;
 }
 
-function shouldIgnoreShellPath(path: string): boolean {
-  return (
-    path === '/dev/null' ||
-    !path.startsWith('/') ||
-    path.startsWith('/bin/') ||
-    path.startsWith('/usr/bin/') ||
-    path.startsWith('/usr/local/bin/')
-  );
-}
-
 function extractMutatingShellPaths(command: string): string[] {
   const paths = new Set<string>();
 
-  // Redirection targets are the write targets. Do not scan heredoc bodies or
-  // piped command output, which can contain arbitrary markdown like `/pr-*`.
-  const redirectionPattern = /(?:^|[\s])(?:\d?>{1,2}|&>)\s*(["']?)(\/[^\s"'|;&)]+)\1/g;
+  // Redirection targets are the write targets. Match absolute, relative, and
+  // home-relative paths. Do not scan heredoc bodies or piped command output.
+  const redirectionPattern =
+    /(?:^|[\s])(?:\d?>{1,2}|&>)\s*(["']?)((?:\/|\.{1,2}\/|~\/)[^\s"'|;&)<>]+)\1/g;
   let redirectMatch: RegExpExecArray | null;
   while ((redirectMatch = redirectionPattern.exec(command)) !== null) {
     const path = redirectMatch[2];
@@ -262,8 +311,17 @@ function extractMutatingShellPaths(command: string): string[] {
   let segmentMatch: RegExpExecArray | null;
   while ((segmentMatch = mutatingSegmentPattern.exec(command)) !== null) {
     const segment = segmentMatch[1] ?? segmentMatch[2] ?? segmentMatch[3] ?? '';
-    for (const path of extractShellAbsolutePaths(segment)) {
+    for (const path of extractShellPaths(segment)) {
       paths.add(path);
+    }
+    // Capture relative-path targets that the absolute-only regex misses (e.g.
+    // `rm -rf ../other-repo`, `cp foo ../../target`).
+    for (const token of tokenizeShellSegment(segment)) {
+      if (!token || token.startsWith('-')) continue;
+      if (shouldIgnoreShellPath(token)) continue;
+      if (looksLikeShellPath(token) && !token.startsWith('/')) {
+        paths.add(token);
+      }
     }
   }
 
@@ -271,13 +329,18 @@ function extractMutatingShellPaths(command: string): string[] {
 }
 
 function mayMutateShellPaths(command: string): boolean {
+  // Detect any mutating command/segment. Relative-path target detection happens
+  // in extractMutatingShellPaths; here we only need to flag that the command
+  // contains *any* mutating operation worth scanning.
   const mutatingCommandPattern =
-    /(?:^|[;&|({]\s*)(?:rm|rmdir|mv|cp|mkdir|touch|tee|chmod|chown|install|truncate)\b|(?:^|[;&|({]\s*)sed\s+-i\b|(?:^|[;&|({]\s*)git\s+(?:checkout|reset|clean|merge|rebase|pull|worktree\s+(?:add|remove|prune))\b|(?:^|[^<])>{1,2}\s*\/|\bcat\s+<<|<<-/;
+    /(?:^|[;&|({]\s*)(?:rm|rmdir|mv|cp|mkdir|touch|tee|chmod|chown|install|truncate)\b|(?:^|[;&|({]\s*)sed\s+-i\b|(?:^|[;&|({]\s*)git\s+(?:checkout|reset|clean|merge|rebase|pull|worktree\s+(?:add|remove|prune))\b|(?:^|[^<])>{1,2}\s*(?:\/|\.{1,2}\/|~\/|\w)|\bcat\s+<<|<<-/;
   return mutatingCommandPattern.test(command);
 }
 
-function getWorkflowTempRoots(): string[] {
-  return ['/tmp', '/private/tmp', tmpdir()];
+function getClaudeProjectDir(cwd: string): string {
+  // Claude SDK encodes the cwd by replacing path separators with hyphens.
+  const encoded = resolvePath(cwd).replace(/\//g, '-');
+  return resolvePath(homedir(), '.claude', 'projects', encoded);
 }
 
 export function getDisallowedToolPath(
@@ -286,19 +349,14 @@ export function getDisallowedToolPath(
   cwd: string,
   allowedRoots: readonly string[] = []
 ): string | null {
-  const normalizedToolName = toolName.toLowerCase();
-  // Read-only provider tools can legitimately target provider scratch files
-  // such as Claude's tool-results cache or temporary diff files created by
-  // prior commands. The workflow safety guard is meant to prevent writes and
-  // destructive shell mutations outside the working path, not to break
-  // read-only review workflows.
-  if (['read', 'grep', 'glob', 'ls'].includes(normalizedToolName)) return null;
-
-  const roots = [
-    cwd,
-    ...allowedRoots,
-    ...(normalizedToolName === 'bash' ? getWorkflowTempRoots() : []),
-  ]
+  // All file-touching tools (read/grep/glob/ls/write/edit/bash/...) are
+  // canonicalized and checked against the allowlist. Read-only tools get the
+  // same allowlist as mutating tools so a prompt-injected agent cannot Read
+  // arbitrary host files. The Claude SDK's per-cwd project cache is allowed
+  // so legitimate SDK scratch reads keep working; the temp tree is no longer
+  // wholesale-allowed for bash — callers that need /tmp access must pass it
+  // via `allowedRoots`.
+  const roots = [cwd, ...allowedRoots, getClaudeProjectDir(cwd)]
     .filter(root => root.trim() !== '')
     .map(root => resolvePath(root));
   for (const rawPath of collectToolPaths(toolName, toolInput)) {
@@ -1192,6 +1250,38 @@ async function executeNodeInternal(
           });
 
         if (isHumanInputTool(msg.toolName)) {
+          // Emit a tool_completed for the human-input tool before transitioning
+          // to node_blocked; otherwise the Web UI keeps the tool in a running
+          // state forever and the workflow card shows a stale in-progress tool.
+          if (lastToolStartedAt) {
+            const prevTool = lastToolStartedAt;
+            const completedAt = Date.now();
+            getWorkflowEventEmitter().emit({
+              type: 'tool_completed',
+              runId: workflowRun.id,
+              toolName: prevTool.toolName,
+              stepName: node.id,
+              durationMs: completedAt - prevTool.startedAt,
+            });
+            deps.store
+              .createWorkflowEvent({
+                workflow_run_id: workflowRun.id,
+                event_type: 'tool_completed',
+                step_name: node.id,
+                data: {
+                  tool_name: prevTool.toolName,
+                  duration_ms: completedAt - prevTool.startedAt,
+                },
+              })
+              .catch((err: Error) => {
+                getLog().error(
+                  { err, workflowRunId: workflowRun.id, eventType: 'tool_completed' },
+                  'workflow_event_persist_failed'
+                );
+              });
+            lastToolStartedAt = null;
+          }
+
           const question = extractHumanInputQuestion(msg.toolInput);
           const blockedOutput = nodeOutputText.trim() ? nodeOutputText : question;
           const duration = Date.now() - nodeStartTime;

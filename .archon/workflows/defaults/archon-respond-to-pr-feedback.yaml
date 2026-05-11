@@ -162,7 +162,7 @@ nodes:
               exit 0
             fi
           else
-            names=$(echo "$rollup" | jq -r "$pending_filter | .[] | (.name // .context // "unknown")" | tr '\n' ',' | sed 's/,$//')
+            names=$(echo "$rollup" | jq -r "$pending_filter | .[] | (.name // .context // \"unknown\")" | tr '\n' ',' | sed 's/,$//')
             echo "  t=${elapsed}s  ${pending}/${total} pending: ${names}"
           fi
         else

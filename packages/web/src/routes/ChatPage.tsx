@@ -181,7 +181,10 @@ export function ChatPage(): React.ReactElement {
   });
 
   const archiveMutation = useMutation({
-    mutationFn: () => deleteTask(taskId ?? ''),
+    mutationFn: () => {
+      if (!taskId) throw new Error('No task selected');
+      return deleteTask(taskId);
+    },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['tasks'] });
       navigate('/chat');

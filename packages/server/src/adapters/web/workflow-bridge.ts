@@ -240,7 +240,8 @@ export class WorkflowEventBridge {
           (event.type === 'loop_iteration_completed' ||
             event.type === 'loop_iteration_failed' ||
             event.type === 'node_completed' ||
-            event.type === 'node_failed')
+            event.type === 'node_failed' ||
+            event.type === 'node_blocked')
         ) {
           this.onStepTransition(workerConversationId);
         }

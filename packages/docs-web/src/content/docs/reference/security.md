@@ -56,7 +56,7 @@ nodes:
 
 In addition to the per-tool `allowed_tools`/`denied_tools` whitelist, the workflow engine enforces a **path allowlist** on every provider tool call made inside a DAG node or loop iteration. Any file-touching tool whose target path falls outside the allowlist aborts the node with:
 
-```
+```text
 Tool '<name>' in node '<id>' targeted path outside the workflow working path: <path>
 ```
 

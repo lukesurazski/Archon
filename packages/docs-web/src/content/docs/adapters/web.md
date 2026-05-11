@@ -71,20 +71,20 @@ The Web UI is a dark-themed single-page application with four main areas:
 
 ### Left Sidebar
 
-- **Tasks list** -- Conversations and workflow runs are grouped under tasks (a task represents a unit of work, typically a branch + PR). Active tasks appear at the top; archived tasks collapse under an "Archived" toggle. Click a task to open its dedicated page at `/tasks/<id>`.
+- **Tasks list** -- Conversations and workflow runs are grouped under tasks (a task represents a unit of work, typically a branch + PR). Active tasks appear at the top; archived tasks collapse under an "Archived" toggle. Click a task to open its dedicated page at `/chat/tasks/<id>`.
 - **Project selector** -- Registered codebases appear here. Select a project to scope the task list and workflow invoker to that repository. You can also register new projects (clone from URL or register a local path) and remove existing ones.
 - **Workflow invoker** -- A quick-launch panel for running workflows. Select a workflow from the dropdown, type a message, and hit Run. Workflows that declare `inputs:` metadata in their YAML pick up a labelled input field with the right placeholder text.
 
 ### Main Workspace
 
-The center of the screen shows either the task workspace (default at `/chat`) or a specific task's page at `/tasks/<id>`. Inside a task, conversations appear on one side and a workflow runner on the other. Each conversation looks and behaves like a standard chat thread.
+The center of the screen shows either the task workspace (default at `/chat`) or a specific task's page at `/chat/tasks/<id>`. Inside a task, conversations appear on one side and a workflow runner on the other. Each conversation looks and behaves like a standard chat thread.
 
 ## Tasks
 
 A **task** is a Web UI container that groups one or more conversations and workflow runs under a single user-facing unit of work -- typically a branch and a pull request. Tasks have a title, optional description, optional `branch_name` and `pr_url`/`pr_number`, and a `status` of `active` or `archived`.
 
 - **Create a task** -- From the sidebar's Tasks button, or via `POST /api/tasks` (see the [API reference](/reference/api/#tasks)).
-- **Open a task** -- Click any task in the sidebar; the task page (`/tasks/:id`) shows its conversations on one side and a workflow runner on the other.
+- **Open a task** -- Click any task in the sidebar; the task page (`/chat/tasks/:id`) shows its conversations on one side and a workflow runner on the other.
 - **Run a workflow inside a task** -- Use the task page's workflow runner. Background runs (e.g. comprehensive PR review) inherit the parent conversation's task and surface in the task's workflow history.
 - **Archive / restore** -- Archiving (sidebar action or `DELETE /api/tasks/{id}`) sets `status = 'archived'`; conversations are preserved. Restore by PATCHing `status: 'active'`.
 

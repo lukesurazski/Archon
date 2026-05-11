@@ -107,6 +107,13 @@ CREATE TABLE IF NOT EXISTS remote_agent_conversations (
   UNIQUE(platform_type, platform_conversation_id)
 );
 
+-- Pre-task installations created remote_agent_conversations without task_id.
+-- Re-running this combined migration is a no-op for CREATE TABLE IF NOT EXISTS,
+-- so we add the column idempotently before any index references it.
+ALTER TABLE remote_agent_conversations
+  ADD COLUMN IF NOT EXISTS task_id UUID
+    REFERENCES remote_agent_tasks(id) ON DELETE SET NULL;
+
 CREATE INDEX IF NOT EXISTS idx_remote_agent_conversations_codebase
   ON remote_agent_conversations(codebase_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_hidden
