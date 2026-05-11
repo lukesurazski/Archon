@@ -1,6 +1,6 @@
 import { useState, useRef, useMemo, useEffect, useCallback } from 'react';
 import { useNavigate, Link } from 'react-router';
-import { Plus, Loader2, ChevronDown, FolderGit2, MessageSquarePlus } from 'lucide-react';
+import { Plus, Loader2, ChevronDown, FolderGit2, ListTodo } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
@@ -160,7 +160,7 @@ export function Sidebar(): React.ReactElement {
     []
   );
 
-  const handleNewOrchestratorChat = useCallback((): void => {
+  const handleTaskWorkspace = useCallback((): void => {
     setSelectedProjectId(null);
     navigate('/chat');
   }, [navigate, setSelectedProjectId]);
@@ -194,14 +194,14 @@ export function Sidebar(): React.ReactElement {
         />
       </div>
 
-      {/* Orchestrator (unscoped) new chat */}
+      {/* Task workspace */}
       <div className="px-3 pb-2">
         <button
-          onClick={handleNewOrchestratorChat}
+          onClick={handleTaskWorkspace}
           className="flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium text-text-secondary hover:bg-surface-elevated hover:text-text-primary transition-colors"
         >
-          <MessageSquarePlus className="h-4 w-4 shrink-0" />
-          New Chat
+          <ListTodo className="h-4 w-4 shrink-0" />
+          Tasks
         </button>
       </div>
 

@@ -232,6 +232,12 @@ Environment variables override all other configuration. They are organized by ca
 | `SESSION_RETENTION_DAYS` | Delete inactive sessions older than N days | `30` |
 | `ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING` | When set to `1`, suppresses the stderr warning emitted when `archon` is run inside a Claude Code session | -- |
 
+### Workflow Engine
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `ARCHON_WORKFLOW_TOOL_CALL_TIMEOUT_MS` | Maximum wall-clock time the engine waits for a single provider tool call to produce a result. Applies to both DAG nodes and loop iterations. When exceeded, the node fails with `Tool '<name>' timed out after Ns without producing a result.` and **the node is not retried**, even when `retry.on_error: 'all'` is configured (the timeout is treated as a non-retryable safety error -- see [Path-Scoped Tool Execution](/reference/security/#path-scoped-tool-execution-workflow-engine)). The effective per-node timeout is `min(node.idle_timeout, this value)`. | `120000` (2 min) |
+
 ### AI Providers -- Claude
 
 | Variable | Description | Default |

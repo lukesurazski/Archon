@@ -15,6 +15,7 @@ import {
   getOrCreateConversation,
   updateConversation,
   findConversationByPlatformId,
+  listConversations,
 } from './conversations';
 import type { Conversation } from '../types';
 import { ConversationNotFoundError } from '../types';
@@ -85,8 +86,8 @@ describe('conversations', () => {
       expect(mockQuery).toHaveBeenCalledTimes(2);
       expect(mockQuery).toHaveBeenNthCalledWith(
         2,
-        'INSERT INTO remote_agent_conversations (platform_type, platform_conversation_id, ai_assistant_type, codebase_id, cwd) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-        ['telegram', 'chat-789', 'claude', null, null]
+        'INSERT INTO remote_agent_conversations (platform_type, platform_conversation_id, ai_assistant_type, codebase_id, cwd, task_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+        ['telegram', 'chat-789', 'claude', null, null, null]
       );
     });
 
@@ -116,8 +117,8 @@ describe('conversations', () => {
       );
       expect(mockQuery).toHaveBeenNthCalledWith(
         3,
-        'INSERT INTO remote_agent_conversations (platform_type, platform_conversation_id, ai_assistant_type, codebase_id, cwd) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-        ['telegram', 'chat-789', 'codex', 'codebase-123', null]
+        'INSERT INTO remote_agent_conversations (platform_type, platform_conversation_id, ai_assistant_type, codebase_id, cwd, task_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+        ['telegram', 'chat-789', 'codex', 'codebase-123', null, null]
       );
     });
 
@@ -139,8 +140,8 @@ describe('conversations', () => {
       expect(result).toEqual(newConversation);
       expect(mockQuery).toHaveBeenNthCalledWith(
         2,
-        'INSERT INTO remote_agent_conversations (platform_type, platform_conversation_id, ai_assistant_type, codebase_id, cwd) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-        ['telegram', 'chat-789', 'codex', null, null]
+        'INSERT INTO remote_agent_conversations (platform_type, platform_conversation_id, ai_assistant_type, codebase_id, cwd, task_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+        ['telegram', 'chat-789', 'codex', null, null, null]
       );
     });
 
@@ -162,8 +163,8 @@ describe('conversations', () => {
       expect(result).toEqual(newConversation);
       expect(mockQuery).toHaveBeenNthCalledWith(
         3,
-        'INSERT INTO remote_agent_conversations (platform_type, platform_conversation_id, ai_assistant_type, codebase_id, cwd) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-        ['telegram', 'chat-789', 'claude', 'non-existent-codebase', null]
+        'INSERT INTO remote_agent_conversations (platform_type, platform_conversation_id, ai_assistant_type, codebase_id, cwd, task_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+        ['telegram', 'chat-789', 'claude', 'non-existent-codebase', null, null]
       );
     });
 
@@ -210,8 +211,8 @@ describe('conversations', () => {
       // Verify inherited values in INSERT
       expect(mockQuery).toHaveBeenNthCalledWith(
         3,
-        'INSERT INTO remote_agent_conversations (platform_type, platform_conversation_id, ai_assistant_type, codebase_id, cwd) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-        ['discord', 'thread-123', 'codex', 'codebase-123', '/workspace/project']
+        'INSERT INTO remote_agent_conversations (platform_type, platform_conversation_id, ai_assistant_type, codebase_id, cwd, task_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+        ['discord', 'thread-123', 'codex', 'codebase-123', '/workspace/project', null]
       );
     });
 
@@ -244,8 +245,8 @@ describe('conversations', () => {
       // Should use inherited assistant type but null for codebase/cwd
       expect(mockQuery).toHaveBeenNthCalledWith(
         3,
-        'INSERT INTO remote_agent_conversations (platform_type, platform_conversation_id, ai_assistant_type, codebase_id, cwd) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-        ['discord', 'thread-123', 'claude', null, null]
+        'INSERT INTO remote_agent_conversations (platform_type, platform_conversation_id, ai_assistant_type, codebase_id, cwd, task_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+        ['discord', 'thread-123', 'claude', null, null, null]
       );
     });
   });
@@ -377,6 +378,35 @@ describe('conversations', () => {
           'Conversation not found: test-conv-id'
         );
       }
+    });
+  });
+
+  describe('listConversations', () => {
+    test('appends task_id filter when taskId is provided', async () => {
+      mockQuery.mockResolvedValueOnce(createQueryResult([]));
+      await listConversations(50, undefined, undefined, false, 'task-abc');
+      const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+      expect(sql).toContain('AND task_id = $');
+      expect(params).toContain('task-abc');
+    });
+
+    test('omits task_id filter when taskId is undefined', async () => {
+      mockQuery.mockResolvedValueOnce(createQueryResult([]));
+      await listConversations(50, undefined, undefined, false);
+      const [sql] = mockQuery.mock.calls[0] as [string, unknown[]];
+      expect(sql).not.toContain('task_id');
+    });
+
+    test('combines codebaseId and taskId filters with sequential placeholders', async () => {
+      mockQuery.mockResolvedValueOnce(createQueryResult([]));
+      await listConversations(50, undefined, 'cb-1', false, 'task-abc');
+      const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+      expect(sql).toContain('codebase_id = $1');
+      expect(sql).toContain('task_id = $2');
+      // params order: [codebaseId, taskId, limit]
+      expect(params[0]).toBe('cb-1');
+      expect(params[1]).toBe('task-abc');
+      expect(params[2]).toBe(50);
     });
   });
 });

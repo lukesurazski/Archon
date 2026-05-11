@@ -11,7 +11,11 @@ import {
   SCRIPT_NODE_AI_FIELDS,
   LOOP_NODE_AI_FIELDS,
 } from './schemas/dag-node';
-import { modelReasoningEffortSchema, webSearchModeSchema } from './schemas/workflow';
+import {
+  modelReasoningEffortSchema,
+  webSearchModeSchema,
+  workflowInputSchema,
+} from './schemas/workflow';
 import { workflowNodeHooksSchema } from './schemas/hooks';
 import { z } from '@hono/zod-openapi';
 
@@ -424,6 +428,24 @@ export function parseWorkflow(content: string, filename: string): ParseResult {
       getLog().warn({ filename, value: raw.tags }, 'invalid_tags_block_ignored');
     }
 
+    let inputs: WorkflowDefinition['inputs'] | undefined;
+    if (Array.isArray(raw.inputs)) {
+      const parsedInputs = z.array(workflowInputSchema).safeParse(raw.inputs);
+      if (parsedInputs.success) {
+        inputs = parsedInputs.data;
+      } else {
+        getLog().warn(
+          {
+            filename,
+            errors: parsedInputs.error.issues.map(issue => issue.message),
+          },
+          'invalid_inputs_block_ignored'
+        );
+      }
+    } else if (raw.inputs !== undefined) {
+      getLog().warn({ filename, value: raw.inputs }, 'invalid_inputs_block_ignored');
+    }
+
     return {
       workflow: {
         name: raw.name,
@@ -438,6 +460,7 @@ export function parseWorkflow(content: string, filename: string): ParseResult {
         nodes: dagNodes,
         ...(worktreePolicy ? { worktree: worktreePolicy } : {}),
         ...(tags !== undefined ? { tags } : {}),
+        ...(inputs !== undefined ? { inputs } : {}),
       },
       error: null,
     };

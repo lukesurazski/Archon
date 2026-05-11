@@ -85,6 +85,21 @@ See the [Variable Reference](/reference/variables/) for the complete list.
 
 Archon ships with bundled default commands for common operations like investigation, implementation, and code review. Repo-level commands in `.archon/commands/` override bundled defaults with the same name.
 
+## Task Containers
+
+A **task** is a Web UI organizational container that groups related
+conversations and workflow runs under a single unit of work -- typically a
+branch and (later) a pull request. Tasks have a title, optional description,
+and optional links to a branch and PR. Tasks are Web-only: the CLI and chat
+platforms operate on conversations directly without a task wrapper.
+
+A task can hold many conversations and many workflow runs. Workflow runs
+dispatched as background workers (e.g. a comprehensive PR review) inherit
+their parent conversation's task so they show up under the same task's
+"Workflow History" panel. Archiving a task hides it from the active list but
+preserves its children -- restore with `PATCH /api/tasks/{id}` setting
+`status: "active"`.
+
 ## Isolation (Worktrees)
 
 Every workflow run gets its own **git worktree** by default -- an isolated copy of your repository. This gives you three things:

@@ -42,7 +42,11 @@ import { createWorkflowDeps } from '../workflows/store-adapter';
 import { loadConfig } from '../config/config-loader';
 import type { MergedConfig } from '../config/config-types';
 import { generateAndSetTitle } from '../services/title-generator';
-import { validateAndResolveIsolation, dispatchBackgroundWorkflow } from './orchestrator';
+import {
+  validateAndResolveIsolation,
+  dispatchBackgroundWorkflow,
+  deriveTaskIsolationHints,
+} from './orchestrator';
 import { IsolationBlockedError } from '@archon/isolation';
 import {
   buildOrchestratorPrompt,
@@ -225,6 +229,8 @@ async function dispatchOrchestratorWorkflow(
   isolationHints?: HandleMessageContext['isolationHints'],
   workflowExecution?: WorkflowExecutionOptions
 ): Promise<void> {
+  const effectiveIsolationHints = await deriveTaskIsolationHints(conversation, isolationHints);
+
   // Auto-attach project to conversation
   await db.updateConversation(conversation.id, {
     codebase_id: codebase.id,
@@ -249,7 +255,7 @@ async function dispatchOrchestratorWorkflow(
         codebase,
         platform,
         conversationId,
-        isolationHints
+        effectiveIsolationHints
       );
       cwd = result.cwd;
     } catch (error) {
@@ -348,7 +354,7 @@ async function dispatchOrchestratorWorkflow(
           conversationDbId: conversation.id,
           codebaseId: codebase.id,
           availableWorkflows: [workflow],
-          isolationHints,
+          isolationHints: effectiveIsolationHints,
           ...(workflowExecution ? { workflowExecution } : {}),
         },
         workflow

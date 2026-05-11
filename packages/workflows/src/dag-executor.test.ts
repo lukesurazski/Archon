@@ -1,6 +1,16 @@
-import { describe, it, expect, beforeEach, afterEach, mock, spyOn, type Mock } from 'bun:test';
+import {
+  describe,
+  it,
+  test,
+  expect,
+  beforeEach,
+  afterEach,
+  mock,
+  spyOn,
+  type Mock,
+} from 'bun:test';
 import { mkdir, writeFile, rm } from 'fs/promises';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import { tmpdir } from 'os';
 import * as git from '@archon/git';
 
@@ -37,6 +47,7 @@ import {
   checkTriggerRule,
   substituteNodeOutputRefs,
   executeDagWorkflow,
+  getDisallowedToolPath,
 } from './dag-executor';
 import { loadMcpConfig } from '@archon/providers/claude/provider';
 import type { DagNode, BashNode, ScriptNode, NodeOutput, WorkflowRun } from './schemas';
@@ -1327,7 +1338,13 @@ describe('executeDagWorkflow -- bash nodes', () => {
       'bash',
       ['-c', 'echo ok'],
       expect.objectContaining({
-        env: expect.objectContaining({ MY_SECRET: 'abc123' }),
+        env: expect.objectContaining({
+          MY_SECRET: 'abc123',
+          TMPDIR: join(testDir, 'artifacts', 'tmp'),
+          TMP: join(testDir, 'artifacts', 'tmp'),
+          TEMP: join(testDir, 'artifacts', 'tmp'),
+          WORKFLOW_TMPDIR: join(testDir, 'artifacts', 'tmp'),
+        }),
       })
     );
     execSpy.mockRestore();
@@ -2112,6 +2129,744 @@ describe('executeDagWorkflow -- tool_called event persistence', () => {
       toolName: 'Write',
       toolInput: { path: '/bar', content: 'x' },
     });
+  });
+});
+
+describe('executeDagWorkflow -- provider tool safety', () => {
+  let testDir: string;
+  let outsideDir: string;
+  let previousToolTimeout: string | undefined;
+
+  beforeEach(async () => {
+    // Capture per-test so each test save/restores the env var independently
+    // (a describe-evaluation-time capture leaks state from earlier tests).
+    previousToolTimeout = process.env.ARCHON_WORKFLOW_TOOL_CALL_TIMEOUT_MS;
+    testDir = join(
+      tmpdir(),
+      `dag-tool-safety-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    );
+    outsideDir = join(
+      tmpdir(),
+      `dag-tool-safety-outside-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    );
+    const commandsDir = join(testDir, '.archon', 'commands');
+    await mkdir(commandsDir, { recursive: true });
+    await mkdir(outsideDir, { recursive: true });
+    await writeFile(join(commandsDir, 'my-cmd.md'), 'My command prompt');
+
+    mockSendQueryDag.mockClear();
+    mockGetAgentProviderDag.mockClear();
+    mockGetAgentProviderDag.mockImplementation(() => ({
+      sendQuery: mockSendQueryDag,
+      getType: () => 'claude',
+      getCapabilities: mockClaudeCapabilities,
+    }));
+  });
+
+  afterEach(async () => {
+    if (previousToolTimeout === undefined) {
+      delete process.env.ARCHON_WORKFLOW_TOOL_CALL_TIMEOUT_MS;
+    } else {
+      process.env.ARCHON_WORKFLOW_TOOL_CALL_TIMEOUT_MS = previousToolTimeout;
+    }
+    mockSendQueryDag.mockImplementation(function* () {
+      yield { type: 'assistant', content: 'DAG AI response' };
+      yield { type: 'result', sessionId: 'dag-session-id' };
+    });
+    try {
+      await rm(testDir, { recursive: true, force: true });
+      await rm(outsideDir, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+
+  it('detects file tool paths outside the workflow working path', async () => {
+    expect(getDisallowedToolPath('Edit', { file_path: join(outsideDir, 'src.ts') }, testDir)).toBe(
+      join(outsideDir, 'src.ts')
+    );
+    expect(getDisallowedToolPath('Edit', { file_path: 'src.ts' }, testDir)).toBeNull();
+    // Read-only tools are subject to the same allowlist as mutating tools so a
+    // prompt-injected agent cannot Read arbitrary host files.
+    expect(
+      getDisallowedToolPath('Read', { file_path: join(outsideDir, 'artifact.md') }, testDir)
+    ).toBe(join(outsideDir, 'artifact.md'));
+    expect(
+      getDisallowedToolPath('Write', { file_path: join(outsideDir, 'artifact.md') }, testDir, [
+        outsideDir,
+      ])
+    ).toBeNull();
+    const artifactsDir = join(testDir, 'artifacts');
+    const workflowScratchDir = join(artifactsDir, 'tmp');
+    await mkdir(workflowScratchDir, { recursive: true });
+    expect(
+      getDisallowedToolPath(
+        'Bash',
+        { command: `touch ${join(workflowScratchDir, 'build-review.py')}` },
+        testDir,
+        [artifactsDir]
+      )
+    ).toBeNull();
+    expect(getDisallowedToolPath('Bash', { command: 'touch /tmp/build-review.py' }, testDir)).toBe(
+      '/tmp/build-review.py'
+    );
+    expect(
+      getDisallowedToolPath(
+        'Bash',
+        { command: `find ${dirname(outsideDir)} -maxdepth 1` },
+        testDir,
+        [dirname(outsideDir)]
+      )
+    ).toBeNull();
+    // Read-style Bash commands targeting out-of-workflow paths must be
+    // blocked just like direct Read/Write tools. Otherwise a prompt-injected
+    // agent could exfiltrate host files (e.g. `cat /etc/passwd`) through
+    // Bash even though the file tools are guarded.
+    expect(
+      getDisallowedToolPath('Bash', { command: `cat ${join(outsideDir, 'src.ts')}` }, testDir)
+    ).toBe(join(outsideDir, 'src.ts'));
+    expect(
+      getDisallowedToolPath(
+        'Bash',
+        {
+          command: `cat ${join(outsideDir, 'tool-results', 'result.txt')} | wc -l`,
+        },
+        testDir
+      )
+    ).toBe(join(outsideDir, 'tool-results', 'result.txt'));
+    const blockedBashPath = join(dirname(dirname(tmpdir())), 'archon-outside-src.ts');
+    expect(
+      getDisallowedToolPath('Bash', { command: `echo hi > ${blockedBashPath}` }, testDir)
+    ).toBe(blockedBashPath);
+    expect(
+      getDisallowedToolPath(
+        'Bash',
+        {
+          command: `cat > ${join(testDir, 'scope.md')} <<'EOF'\n# PR Review Scope\nArtifact path: /pr-review/scope.md\nEOF`,
+        },
+        testDir
+      )
+    ).toBeNull();
+    expect(
+      getDisallowedToolPath(
+        'Bash',
+        { command: `gh pr checks 4 2>/dev/null && echo ok > ${join(testDir, 'checks.txt')}` },
+        testDir
+      )
+    ).toBeNull();
+    expect(
+      getDisallowedToolPath(
+        'Bash',
+        { command: `echo scratch > ${join(tmpdir(), 'archon-scratch.txt')}` },
+        testDir,
+        [tmpdir()]
+      )
+    ).toBeNull();
+  });
+
+  it('blocks the workflow instead of completing when the provider requests human input', async () => {
+    const mockStore = createMockStore();
+    const mockDeps = createMockDeps(mockStore);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun();
+
+    mockSendQueryDag.mockImplementation(function* () {
+      yield { type: 'assistant', content: 'I need a decision.' };
+      yield {
+        type: 'tool',
+        toolName: 'AskUserQuestion',
+        toolInput: { questions: [{ question: 'Should I proceed?' }] },
+      };
+      yield { type: 'result', sessionId: 'should-not-complete' };
+    });
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag',
+      testDir,
+      { name: 'human-input-workflow', nodes: [{ id: 'ask', prompt: 'Ask if blocked' }] },
+      workflowRun,
+      'claude',
+      'sonnet',
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs',
+      {
+        assistant: 'claude',
+        commands: {},
+        defaults: { loadDefaultCommands: false, loadDefaultWorkflows: false },
+        assistants: { claude: {} },
+      }
+    );
+
+    expect(mockStore.updateWorkflowRun).toHaveBeenCalledWith(
+      workflowRun.id,
+      expect.objectContaining({ status: 'blocked' })
+    );
+    expect(mockStore.completeWorkflowRun).not.toHaveBeenCalled();
+    // A blocked-only run must not fail at the workflow level either — resume
+    // depends on the run staying in a recoverable state.
+    expect(mockStore.failWorkflowRun).not.toHaveBeenCalled();
+
+    const events = (mockStore.createWorkflowEvent as ReturnType<typeof mock>).mock.calls.map(
+      call => (call[0] as { event_type: string }).event_type
+    );
+    expect(events).toContain('tool_called');
+    expect(events).toContain('node_blocked');
+    expect(events).not.toContain('node_completed');
+  });
+
+  it('marks the run failed (not blocked) when one sibling fails and another blocks', async () => {
+    // `failed` must take precedence over `blocked` at the layer level: a
+    // parallel layer with one failed node + one human-input node leaves the
+    // run in `blocked` if precedence is wrong, even though resume cannot
+    // recover the already-failed sibling. Guard against that regression.
+    const mockStore = createMockStore();
+    const mockDeps = createMockDeps(mockStore);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('dag-blocked-vs-failed-run');
+
+    mockSendQueryDag.mockImplementation(function* (prompt: string) {
+      if (prompt.includes('Ask the user')) {
+        // The "ask" node blocks on human input.
+        yield {
+          type: 'tool',
+          toolName: 'AskUserQuestion',
+          toolInput: { questions: [{ question: 'Should I proceed?' }] },
+        };
+        yield { type: 'result', sessionId: 'ask-session' };
+      } else {
+        // The sibling "edit" node fails via an out-of-workflow Edit (a
+        // non-retryable safety violation).
+        yield {
+          type: 'tool',
+          toolName: 'Edit',
+          toolInput: { file_path: join(outsideDir, 'src.ts') },
+        };
+      }
+    });
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-blocked-vs-failed',
+      testDir,
+      {
+        name: 'blocked-vs-failed-workflow',
+        nodes: [
+          { id: 'ask', prompt: 'Ask the user a question' },
+          { id: 'edit', prompt: 'Edit a file' },
+        ],
+      },
+      workflowRun,
+      'claude',
+      'sonnet',
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs',
+      minimalConfig
+    );
+
+    // The run must end via failWorkflowRun, NOT via a layer-completion
+    // updateWorkflowRun(status: 'blocked'). A node-level blocked write
+    // happens first when AskUserQuestion fires (with metadata.blocked
+    // describing the prompt), but the final layer-completion logic must
+    // override it with a failed-terminal write — otherwise resume cannot
+    // recover the already-failed sibling and the user is trapped.
+    expect(mockStore.failWorkflowRun).toHaveBeenCalled();
+    const layerBlockedCalls = (
+      mockStore.updateWorkflowRun as ReturnType<typeof mock>
+    ).mock.calls.filter((call: unknown[]) => {
+      const update = call[1] as { status?: string; metadata?: { node_counts?: unknown } };
+      return update?.status === 'blocked' && update?.metadata?.node_counts !== undefined;
+    });
+    expect(layerBlockedCalls).toHaveLength(0);
+  });
+
+  it('fails the workflow when a provider tool targets outside the working path', async () => {
+    const mockStore = createMockStore();
+    const mockDeps = createMockDeps(mockStore);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('dag-tool-path-guard-run');
+
+    mockSendQueryDag.mockImplementation(function* () {
+      yield {
+        type: 'tool',
+        toolName: 'Edit',
+        toolInput: { file_path: join(outsideDir, 'src.ts') },
+      };
+    });
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag-tool-path-guard',
+      testDir,
+      { name: 'dag-tool-path-guard', nodes: [node('my-cmd')] },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    const nodeFailedEvents = (mockStore.createWorkflowEvent as ReturnType<typeof mock>).mock.calls
+      .map((call: unknown[]) => call[0] as { event_type: string; data?: { error?: string } })
+      .filter(event => event.event_type === 'node_failed');
+    expect(
+      nodeFailedEvents.some(event =>
+        event.data?.error?.includes('targeted path outside the workflow working path')
+      )
+    ).toBe(true);
+    expect(mockSendQueryDag).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses workflowRun.working_path as the provider cwd when it differs from the caller cwd', async () => {
+    const sourceDir = outsideDir;
+    const mockStore = createMockStore();
+    const mockDeps = createMockDeps(mockStore);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('dag-working-path-run', { working_path: testDir });
+
+    mockSendQueryDag.mockImplementation(function* () {
+      yield { type: 'assistant', content: 'Used correct cwd' };
+      yield { type: 'result', sessionId: 'dag-working-path-session' };
+    });
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag-working-path',
+      sourceDir,
+      { name: 'dag-working-path', nodes: [node('my-cmd')] },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    expect(mockSendQueryDag.mock.calls[0][1]).toBe(testDir);
+  });
+
+  it('detects disallowed paths for Write, MultiEdit, NotebookEdit, Grep, Glob, LS', () => {
+    const outside = join(outsideDir, 'x');
+    // Each tool has its own path-key shape; a typo in any one (e.g.
+    // `notebookedit` → `notebook_edit`) would silently disable the safety
+    // guard for that tool. This test pins all 6 file-touching, non-Edit/Bash
+    // tools at once so a single regression surfaces here.
+    expect(getDisallowedToolPath('Write', { file_path: outside }, testDir)).toBe(outside);
+    expect(getDisallowedToolPath('MultiEdit', { file_path: outside }, testDir)).toBe(outside);
+    expect(getDisallowedToolPath('NotebookEdit', { notebook_path: outside }, testDir)).toBe(
+      outside
+    );
+    expect(getDisallowedToolPath('Grep', { path: outside }, testDir)).toBe(outside);
+    expect(getDisallowedToolPath('Glob', { path: outside }, testDir)).toBe(outside);
+    expect(getDisallowedToolPath('LS', { path: outside }, testDir)).toBe(outside);
+  });
+
+  it('handles array-of-path inputs (Glob with multiple roots)', () => {
+    const outside = join(outsideDir, 'a');
+    // If any element of the array is disallowed, the guard must catch it.
+    expect(getDisallowedToolPath('Glob', { path: [outside, testDir] }, testDir)).toBe(outside);
+    // Array with all-allowed paths must pass.
+    expect(
+      getDisallowedToolPath('Glob', { path: [join(testDir, 'a'), join(testDir, 'b')] }, testDir)
+    ).toBeNull();
+  });
+
+  it('ignores tools without a registered path key', () => {
+    // Tools we deliberately don't sandbox (e.g. Task, WebFetch) must not be
+    // accidentally restricted by future refactors that expand the table.
+    expect(getDisallowedToolPath('Task', { file_path: join(outsideDir, 'x') }, testDir)).toBeNull();
+    expect(getDisallowedToolPath('WebFetch', { url: 'https://example.com' }, testDir)).toBeNull();
+  });
+
+  describe('mayMutateShellPaths regex coverage', () => {
+    // The shell-mutation regex is hand-written and covers ~10 command
+    // families. The original test set covered only `echo > path` and `find`;
+    // these table-driven cases pin one positive per command family plus a
+    // few negative cases to lock both kinds of regressions (false negatives
+    // = sandbox bypass, false positives = legitimate workflow blocked).
+    const blocked = join(dirname(dirname(tmpdir())), 'archon-mutate-target.txt');
+    const cases: Array<[string, string, boolean]> = [
+      ['rm', `rm ${blocked}`, true],
+      ['rmdir', `rmdir ${blocked}`, true],
+      ['mv', `mv foo ${blocked}`, true],
+      ['cp', `cp foo ${blocked}`, true],
+      ['mkdir', `mkdir -p ${blocked}`, true],
+      ['touch', `touch ${blocked}`, true],
+      ['chmod', `chmod 755 ${blocked}`, true],
+      ['sed -i', `sed -i 's/a/b/' ${blocked}`, true],
+      ['git checkout', `git checkout main -- ${blocked}`, true],
+      ['git reset', `git reset --hard ${blocked}`, true],
+      ['git worktree add', `git worktree add ${blocked} main`, true],
+      ['heredoc redirect', `cat <<EOF > ${blocked}\nfoo\nEOF`, true],
+      ['chained ;', `cd /tmp; rm ${blocked}`, true],
+      ['chained &&', `cd /tmp && rm ${blocked}`, true],
+      // Read-style commands targeting out-of-workflow paths are blocked too,
+      // so Bash cannot bypass the read sandbox enforced on Read/Grep/etc.
+      ['ls reads outside', `ls ${blocked}`, true],
+      ['cat reads outside', `cat ${blocked}`, true],
+      // Allowed cases lock the contract from the other direction: a regex that
+      // becomes over-broad and starts blocking in-workspace commands must fail
+      // here, not silently sail through with only-true assertions.
+      // Use relative-explicit paths (`./`) so they resolve under testDir at
+      // call time rather than referencing testDir here at describe-evaluation
+      // (which runs before beforeEach assigns it).
+      ['ls inside workspace', `ls ./src/file.ts`, false],
+      ['cat inside workspace', `cat ./README.md`, false],
+    ];
+    test.each(cases)('command "%s" → blocked=%s', (_label, command, shouldBlock) => {
+      const result = getDisallowedToolPath('Bash', { command }, testDir);
+      if (shouldBlock) {
+        expect(result).toBe(blocked);
+      } else {
+        expect(result).toBeNull();
+      }
+    });
+  });
+
+  describe('shell variable allowlist bypass', () => {
+    // Bash expands `$HOME`, `${TMPDIR}`, etc. before the kernel sees the path.
+    // Without explicit expansion, the literal `$HOME/foo` token resolves under
+    // `cwd` as `<cwd>/$HOME/foo`, which is lexically inside cwd and would pass
+    // the allowlist — but the real write lands under the user's home
+    // directory. These tests pin the fail-closed behavior on both the read
+    // (`cat`) and write (`tee`) branches of the path-extraction code.
+    let savedHome: string | undefined;
+    let savedTmpdir: string | undefined;
+
+    beforeEach(() => {
+      savedHome = process.env.HOME;
+      savedTmpdir = process.env.TMPDIR;
+    });
+
+    afterEach(() => {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+      if (savedTmpdir === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = savedTmpdir;
+    });
+
+    it('blocks read commands targeting $HOME/... outside the allowlist', () => {
+      process.env.HOME = '/Users/test-home';
+      const result = getDisallowedToolPath('Bash', { command: 'cat $HOME/.ssh/id_rsa' }, testDir);
+      expect(result).toBe('/Users/test-home/.ssh/id_rsa');
+    });
+
+    it('blocks write commands targeting ${TMPDIR}/... outside the allowlist', () => {
+      process.env.TMPDIR = '/private/var/folders/test-tmp';
+      const result = getDisallowedToolPath('Bash', { command: 'tee ${TMPDIR}/exfil.txt' }, testDir);
+      expect(result).toBe('/private/var/folders/test-tmp/exfil.txt');
+    });
+
+    it('allows ${TMPDIR}/... when the resolved path is in allowedRoots', () => {
+      const allowedTmp = join(tmpdir(), `archon-shellvar-allow-${Date.now()}`);
+      process.env.TMPDIR = allowedTmp;
+      const result = getDisallowedToolPath(
+        'Bash',
+        { command: 'tee $TMPDIR/scratch.txt' },
+        testDir,
+        [allowedTmp]
+      );
+      expect(result).toBeNull();
+    });
+
+    it('rejects unknown $VAR prefixes with a sentinel path', () => {
+      // `$FOO` is not in the allowlisted-expand set, so the token collapses
+      // to a sentinel absolute path that cannot pass any reasonable
+      // workflow allowlist. Without this, `<cwd>/$FOO/bar` would be lexically
+      // inside cwd and bypass the check.
+      const result = getDisallowedToolPath('Bash', { command: 'cat $UNKNOWN_VAR/secret' }, testDir);
+      expect(result).not.toBeNull();
+      expect(result).toContain('__archon_unresolved_shell_var__');
+    });
+
+    it('rejects shell variables that look unset at runtime', () => {
+      delete process.env.HOME;
+      const result = getDisallowedToolPath('Bash', { command: 'cat $HOME/notes.txt' }, testDir);
+      expect(result).not.toBeNull();
+      expect(result).toContain('__archon_unresolved_shell_var__');
+    });
+
+    it('does NOT expand identifiers that lack a path separator', () => {
+      // `$HOMEDIR` (no slash) is a different identifier; do not treat it as a
+      // `$HOME` prefix. Without this guard we would wrongly poison legitimate
+      // tokens like `$HOMEDIRECTORY`.
+      process.env.HOME = '/Users/test-home';
+      const result = getDisallowedToolPath('Bash', { command: 'cat $HOMEDIR/src.ts' }, testDir);
+      expect(result).toBeNull();
+    });
+  });
+
+  it('does NOT retry safety violations even when retry.onError = all', async () => {
+    // Safety errors carry a structured `nonRetryable: true` flag in
+    // NodeOutput (set by the WorkflowNonRetryableError class). This guard
+    // is load-bearing: combined with `retry.onError: 'all'`, a missing
+    // suppression would loop the same out-of-bounds tool call up to
+    // max_retries times, burning provider budget and producing nothing.
+    const mockStore = createMockStore();
+    const mockDeps = createMockDeps(mockStore);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('dag-safety-no-retry-run');
+
+    mockSendQueryDag.mockImplementation(function* () {
+      yield {
+        type: 'tool',
+        toolName: 'Edit',
+        toolInput: { file_path: join(outsideDir, 'x.ts') },
+      };
+    });
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag-safety-no-retry',
+      testDir,
+      {
+        name: 'safety-no-retry',
+        nodes: [node('my-cmd', undefined, { retry: { on_error: 'all', max_attempts: 5 } })],
+      },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    // Despite retry.onError: 'all' + maxRetries: 5, the safety error must
+    // short-circuit retries — sendQuery is called exactly once.
+    expect(mockSendQueryDag).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails a loop iteration when a provider tool targets outside the working path', async () => {
+    // Loop nodes duplicate the path-safety check from the DAG path. This
+    // test asserts the duplicate is wired correctly — a regression here
+    // would let agents inside loop nodes (the common iterative coding
+    // shape, e.g. archon-execute) bypass the sandbox while DAG nodes
+    // remained correctly guarded.
+    const mockStore = createMockStore();
+    const mockDeps = createMockDeps(mockStore);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('loop-safety-run');
+
+    mockSendQueryDag.mockImplementation(function* () {
+      yield {
+        type: 'tool',
+        toolName: 'Edit',
+        toolInput: { file_path: join(outsideDir, 'src.ts') },
+      };
+    });
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-loop-safety',
+      testDir,
+      {
+        name: 'loop-safety',
+        nodes: [
+          {
+            id: 'loop-node',
+            loop: { prompt: 'do stuff', until: 'DONE', max_iterations: 1 },
+          },
+        ],
+      },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    const failureEvents = (mockStore.createWorkflowEvent as ReturnType<typeof mock>).mock.calls
+      .map((call: unknown[]) => call[0] as { event_type: string; data?: { error?: string } })
+      .filter(
+        event => event.event_type === 'loop_iteration_failed' || event.event_type === 'node_failed'
+      );
+    expect(failureEvents.some(event => event.data?.error?.includes("in loop 'loop-node'"))).toBe(
+      true
+    );
+  });
+
+  it('fails a loop iteration when the active tool exceeds the tool timeout', async () => {
+    process.env.ARCHON_WORKFLOW_TOOL_CALL_TIMEOUT_MS = '25';
+    const mockStore = createMockStore();
+    const mockDeps = createMockDeps(mockStore);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('loop-tool-timeout-run');
+
+    mockSendQueryDag.mockImplementation(async function* () {
+      yield {
+        type: 'tool',
+        toolName: 'Edit',
+        toolInput: { file_path: join(testDir, 'src.ts') },
+      };
+      await new Promise<void>(() => {});
+    });
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-loop-tool-timeout',
+      testDir,
+      {
+        name: 'loop-tool-timeout',
+        nodes: [
+          {
+            id: 'loop-node',
+            loop: { prompt: 'do stuff', until: 'DONE', max_iterations: 1 },
+            // `on_error: 'all'` + retries > 1 proves the non-retryable contract:
+            // tool timeouts must short-circuit retries.
+            retry: { on_error: 'all', max_attempts: 3 },
+          },
+        ],
+      },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    const failureEvents = (mockStore.createWorkflowEvent as ReturnType<typeof mock>).mock.calls
+      .map((call: unknown[]) => call[0] as { event_type: string; data?: { error?: string } })
+      .filter(
+        event => event.event_type === 'loop_iteration_failed' || event.event_type === 'node_failed'
+      );
+    expect(
+      failureEvents.some(
+        event =>
+          event.data?.error?.includes("in loop 'loop-node'") &&
+          event.data.error.includes('timed out')
+      )
+    ).toBe(true);
+    // Non-retryable: even with retry.on_error: 'all' + max_attempts: 3,
+    // sendQuery must run exactly once.
+    expect(mockSendQueryDag).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails the workflow when an active provider tool exceeds the tool timeout', async () => {
+    process.env.ARCHON_WORKFLOW_TOOL_CALL_TIMEOUT_MS = '25';
+    const mockStore = createMockStore();
+    const mockDeps = createMockDeps(mockStore);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('dag-tool-timeout-run');
+
+    mockSendQueryDag.mockImplementation(async function* () {
+      yield {
+        type: 'tool',
+        toolName: 'Edit',
+        toolInput: { file_path: join(testDir, 'src.ts') },
+      };
+      await new Promise<void>(() => {});
+    });
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag-tool-timeout',
+      testDir,
+      {
+        name: 'dag-tool-timeout',
+        // `on_error: 'all'` + retries > 1 proves the non-retryable contract:
+        // tool timeouts must short-circuit retries.
+        nodes: [node('my-cmd', undefined, { retry: { on_error: 'all', max_attempts: 3 } })],
+      },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    const nodeFailedEvents = (mockStore.createWorkflowEvent as ReturnType<typeof mock>).mock.calls
+      .map((call: unknown[]) => call[0] as { event_type: string; data?: { error?: string } })
+      .filter(event => event.event_type === 'node_failed');
+    expect(
+      nodeFailedEvents.some(
+        event =>
+          event.data?.error?.includes("Tool 'Edit'") && event.data.error.includes('timed out')
+      )
+    ).toBe(true);
+    expect(mockSendQueryDag).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails the workflow when provider node processing stalls after a tool call', async () => {
+    process.env.ARCHON_WORKFLOW_TOOL_CALL_TIMEOUT_MS = '25';
+    const mockStore = createMockStore();
+    const mockDeps = createMockDeps(mockStore);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('dag-tool-watchdog-run');
+
+    (platform.getStreamingMode as Mock<() => 'stream' | 'batch'>).mockImplementation(
+      () => 'stream'
+    );
+    const sendStructuredEvent = platform.sendStructuredEvent as Mock<
+      NonNullable<IWorkflowPlatform['sendStructuredEvent']>
+    >;
+    sendStructuredEvent.mockImplementation(() => new Promise<void>(() => {}));
+
+    mockSendQueryDag.mockImplementation(async function* () {
+      yield {
+        type: 'tool',
+        toolName: 'Edit',
+        toolInput: { file_path: join(testDir, 'src.ts') },
+      };
+      yield { type: 'result', sessionId: 'session-after-tool' };
+    });
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag-tool-watchdog',
+      testDir,
+      {
+        name: 'dag-tool-watchdog',
+        nodes: [node('my-cmd')],
+      },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    const nodeFailedEvents = (mockStore.createWorkflowEvent as ReturnType<typeof mock>).mock.calls
+      .map((call: unknown[]) => call[0] as { event_type: string; data?: { error?: string } })
+      .filter(event => event.event_type === 'node_failed');
+    expect(
+      nodeFailedEvents.some(
+        event =>
+          event.data?.error?.includes("Tool 'Edit'") && event.data.error.includes('timed out')
+      )
+    ).toBe(true);
+    expect(mockStore.failWorkflowRun).toHaveBeenCalled();
   });
 });
 
@@ -3178,7 +3933,7 @@ describe('executeDagWorkflow -- resume with priorCompletedNodes', () => {
       ).mock.calls;
       expect(completeCalls.length).toBe(1);
       expect(completeCalls[0][1]).toEqual({
-        node_counts: { completed: 1, failed: 0, skipped: 0, total: 1 },
+        node_counts: { completed: 1, failed: 0, skipped: 0, blocked: 0, total: 1 },
       });
     });
 
@@ -3967,7 +4722,7 @@ describe('executeDagWorkflow -- resume with priorCompletedNodes', () => {
       ).mock.calls;
       expect(completeCalls.length).toBe(1);
       expect(completeCalls[0][1]).toEqual({
-        node_counts: { completed: 1, failed: 0, skipped: 0, total: 1 },
+        node_counts: { completed: 1, failed: 0, skipped: 0, blocked: 0, total: 1 },
       });
     });
 
@@ -5468,6 +6223,7 @@ describe('executeDagWorkflow -- env var injection', () => {
     const mockDeps = createMockDeps();
     const platform = createMockPlatform();
     const workflowRun = makeWorkflowRun();
+    const artifactsDir = join(testDir, 'artifacts');
 
     await executeDagWorkflow(
       mockDeps,
@@ -5478,7 +6234,7 @@ describe('executeDagWorkflow -- env var injection', () => {
       workflowRun,
       'claude',
       undefined,
-      join(testDir, 'artifacts'),
+      artifactsDir,
       join(testDir, 'logs'),
       'main',
       'docs/',
@@ -5487,13 +6243,23 @@ describe('executeDagWorkflow -- env var injection', () => {
 
     expect(mockSendQueryDag.mock.calls.length).toBeGreaterThan(0);
     const optionsArg = mockSendQueryDag.mock.calls[0][3] as Record<string, unknown>;
-    expect(optionsArg?.env).toEqual({ MY_SECRET: 'abc123' });
+    expect(optionsArg?.env).toEqual(
+      expect.objectContaining({
+        MY_SECRET: 'abc123',
+        ARTIFACTS_DIR: artifactsDir,
+        WORKFLOW_TMPDIR: join(artifactsDir, 'tmp'),
+        TMPDIR: join(artifactsDir, 'tmp'),
+        TMP: join(artifactsDir, 'tmp'),
+        TEMP: join(artifactsDir, 'tmp'),
+      })
+    );
   });
 
-  it('does not set env on claudeOptions when config.envVars is empty', async () => {
+  it('sets workflow scratch env on provider nodes even when config.envVars is empty', async () => {
     const mockDeps = createMockDeps();
     const platform = createMockPlatform();
     const workflowRun = makeWorkflowRun();
+    const artifactsDir = join(testDir, 'artifacts');
 
     await executeDagWorkflow(
       mockDeps,
@@ -5504,7 +6270,7 @@ describe('executeDagWorkflow -- env var injection', () => {
       workflowRun,
       'claude',
       undefined,
-      join(testDir, 'artifacts'),
+      artifactsDir,
       join(testDir, 'logs'),
       'main',
       'docs/',
@@ -5513,7 +6279,15 @@ describe('executeDagWorkflow -- env var injection', () => {
 
     expect(mockSendQueryDag.mock.calls.length).toBeGreaterThan(0);
     const optionsArg = mockSendQueryDag.mock.calls[0]?.[3] as Record<string, unknown> | undefined;
-    expect(optionsArg?.env).toBeUndefined();
+    expect(optionsArg?.env).toEqual(
+      expect.objectContaining({
+        ARTIFACTS_DIR: artifactsDir,
+        WORKFLOW_TMPDIR: join(artifactsDir, 'tmp'),
+        TMPDIR: join(artifactsDir, 'tmp'),
+        TMP: join(artifactsDir, 'tmp'),
+        TEMP: join(artifactsDir, 'tmp'),
+      })
+    );
   });
 });
 
@@ -5858,7 +6632,7 @@ describe('executeDagWorkflow -- cost tracking', () => {
     ).mock.calls;
     expect(completeCalls.length).toBe(1);
     expect(completeCalls[0][1]).toEqual({
-      node_counts: { completed: 1, failed: 0, skipped: 0, total: 1 },
+      node_counts: { completed: 1, failed: 0, skipped: 0, blocked: 0, total: 1 },
       total_cost_usd: 0.0042,
     });
   });
@@ -6516,7 +7290,13 @@ describe('executeDagWorkflow -- script nodes', () => {
       'bun',
       ['--no-env-file', '-e', 'console.log("ok")'],
       expect.objectContaining({
-        env: expect.objectContaining({ MY_SECRET: 'abc123' }),
+        env: expect.objectContaining({
+          MY_SECRET: 'abc123',
+          TMPDIR: join(testDir, 'artifacts', 'tmp'),
+          TMP: join(testDir, 'artifacts', 'tmp'),
+          TEMP: join(testDir, 'artifacts', 'tmp'),
+          WORKFLOW_TMPDIR: join(testDir, 'artifacts', 'tmp'),
+        }),
       })
     );
     execSpy.mockRestore();

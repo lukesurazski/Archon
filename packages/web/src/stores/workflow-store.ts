@@ -269,11 +269,18 @@ export const useWorkflowStore = create<WorkflowStoreState>()(
                 dagNodes.push(nodeState);
               }
 
-              return { ...wf, dagNodes };
+              return {
+                ...wf,
+                dagNodes,
+                status: event.status === 'blocked' ? 'blocked' : wf.status,
+              };
             }),
           undefined,
           'workflow/dagNode'
         );
+        if (event.status === 'blocked') {
+          invalidateWorkflowQueries();
+        }
       },
 
       handleLoopIteration: (event: LoopIterationEvent): void => {

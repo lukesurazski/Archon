@@ -1,28 +1,49 @@
 import { useState, useMemo, useRef, useCallback, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { MessageSquarePlus, Search, Plus, Loader2, FolderGit2 } from 'lucide-react';
+import { Link, useParams, useNavigate } from 'react-router';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Archive, ChevronLeft, MessageSquarePlus, Search, Plus, Loader2 } from 'lucide-react';
 import { ChatInterface } from '@/components/chat/ChatInterface';
-import { ConversationItem } from '@/components/conversations/ConversationItem';
+import { TaskConversationList } from '@/components/tasks/TaskConversationList';
+import { TaskHeader } from '@/components/tasks/TaskHeader';
+import { TaskWorkflowRunner } from '@/components/tasks/TaskWorkflowRunner';
+import { TasksView } from '@/components/sidebar/TasksView';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import { useProject } from '@/contexts/ProjectContext';
 import {
-  createConversation,
-  deleteConversation,
-  listConversations,
-  listWorkflowRuns,
-  runWorkflow,
   addCodebase,
+  createConversation,
+  deleteTask,
   getCodebaseInput,
+  getTask,
+  listTasks,
 } from '@/lib/api';
-import type { CodebaseResponse, ConversationResponse, WorkflowRunResponse } from '@/lib/api';
-import { cn } from '@/lib/utils';
+import { useCreateTaskFlow } from '@/hooks/useCreateTaskFlow';
+import type { CodebaseResponse } from '@/lib/api';
 
 const PANEL_MIN = 220;
 const PANEL_MAX = 420;
 const PANEL_DEFAULT = 260;
 const STORAGE_KEY = 'archon-chat-panel-width';
+
+function parseWorkspacePath(rawPath: string | undefined): {
+  taskId?: string;
+  conversationId?: string;
+} {
+  if (!rawPath) return {};
+
+  // React Router v7's useParams() returns already-decoded values (including
+  // the splat `*` param), so we do not decode again here.
+  const parts = rawPath.split('/').filter(Boolean);
+  if (parts[0] === 'tasks' && parts[1]) {
+    return {
+      taskId: parts[1],
+      conversationId: parts[2] === 'chats' ? parts[3] : undefined,
+    };
+  }
+
+  return { conversationId: rawPath };
+}
 
 function getInitialWidth(): number {
   const stored = localStorage.getItem(STORAGE_KEY);
@@ -34,8 +55,8 @@ function getInitialWidth(): number {
 }
 
 export function ChatPage(): React.ReactElement {
-  const { '*': rawConversationId } = useParams();
-  const conversationId = rawConversationId ? decodeURIComponent(rawConversationId) : undefined;
+  const { '*': rawWorkspacePath } = useParams();
+  const { taskId, conversationId } = parseWorkspacePath(rawWorkspacePath);
 
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -51,13 +72,16 @@ export function ChatPage(): React.ReactElement {
   const [addValue, setAddValue] = useState('');
   const [addLoading, setAddLoading] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
-  const [rerunningWorkflowRunId, setRerunningWorkflowRunId] = useState<string | null>(null);
-  const [rerunError, setRerunError] = useState<string | null>(null);
-  // Synchronous guard against double-rerun on rapid clicks. State updates are batched
-  // and won't reflect until the next render, so a closure check on rerunningWorkflowRunId
-  // can race; the ref flips immediately so the second click bails out.
-  const rerunningRef = useRef(false);
   const addInputRef = useRef<HTMLInputElement>(null);
+
+  // Single banner shared by createTask / new-chat / archive errors. These
+  // are related user actions and one error slot keeps the UI quiet
+  // (last writer wins). createTask usually navigates away on success, so
+  // the slot is rarely contested; new-chat + archive are bound to the same
+  // page but the simultaneous-flight case is benign — the surviving error
+  // is whichever finished most recently.
+  const [taskActionError, setTaskActionError] = useState<string | null>(null);
+  const createTaskFlow = useCreateTaskFlow();
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, String(width));
@@ -101,36 +125,29 @@ export function ChatPage(): React.ReactElement {
     [width]
   );
 
-  const { data: conversations } = useQuery({
-    queryKey: ['conversations', selectedProjectId],
-    queryFn: () => listConversations(selectedProjectId ?? undefined),
+  const { data: tasks } = useQuery({
+    queryKey: ['tasks', selectedProjectId],
+    queryFn: () => listTasks({ codebaseId: selectedProjectId ?? undefined }),
     refetchInterval: 10_000,
   });
 
-  const { data: runs } = useQuery({
-    queryKey: ['workflow-runs-status'],
-    queryFn: () => listWorkflowRuns({ limit: 200 }),
-    refetchInterval: 10_000,
+  const { data: archivedTasks } = useQuery({
+    queryKey: ['tasks', selectedProjectId, 'archived'],
+    queryFn: () =>
+      listTasks({
+        codebaseId: selectedProjectId ?? undefined,
+        status: 'archived',
+        limit: 100,
+      }),
+    refetchInterval: 30_000,
   });
 
-  const latestWorkflowRunMap = useMemo((): Map<string, WorkflowRunResponse> => {
-    const map = new Map<string, WorkflowRunResponse>();
-    if (!runs) return map;
-
-    const sortedRuns = [...runs].sort((a, b) => {
-      const aTime = new Date(a.started_at.endsWith('Z') ? a.started_at : `${a.started_at}Z`);
-      const bTime = new Date(b.started_at.endsWith('Z') ? b.started_at : `${b.started_at}Z`);
-      return bTime.getTime() - aTime.getTime();
-    });
-
-    for (const run of sortedRuns) {
-      // For web runs, parent_conversation_id is the visible conversation in the sidebar.
-      // For CLI runs, conversation_id is the only conversation (no parent/worker split).
-      const key = run.parent_conversation_id ?? run.conversation_id;
-      if (!map.has(key)) map.set(key, run);
-    }
-    return map;
-  }, [runs]);
+  const { data: selectedTask, isLoading: isLoadingTask } = useQuery({
+    queryKey: ['task', taskId],
+    queryFn: () => getTask(taskId ?? ''),
+    enabled: Boolean(taskId),
+    refetchInterval: 10_000,
+  });
 
   const codebaseMap = useMemo((): Map<string, CodebaseResponse> => {
     const map = new Map<string, CodebaseResponse>();
@@ -142,67 +159,42 @@ export function ChatPage(): React.ReactElement {
     return map;
   }, [codebases]);
 
-  const filtered = useMemo(
-    () =>
-      conversations?.filter(conv => {
-        if (!searchQuery) return true;
-        const query = searchQuery.toLowerCase();
-        return (conv.title ?? conv.platform_conversation_id).toLowerCase().includes(query);
-      }),
-    [conversations, searchQuery]
-  );
+  const handleNewTask = useCallback((): void => {
+    setTaskActionError(null);
+    createTaskFlow({ codebaseId: selectedProjectId ?? undefined }).catch((err: unknown) => {
+      setTaskActionError(err instanceof Error ? err.message : 'Failed to create task');
+    });
+  }, [createTaskFlow, selectedProjectId]);
 
-  const handleNewChat = useCallback((): void => {
-    navigate('/chat');
-  }, [navigate]);
-
-  const handleRerunWorkflow = useCallback(
-    (
-      run: { id: string; workflowName: string; userMessage: string; codebaseId: string | null },
-      _conversation: ConversationResponse
-    ): void => {
-      if (rerunningRef.current) return;
-      rerunningRef.current = true;
-
-      setRerunningWorkflowRunId(run.id);
-      setRerunError(null);
-
-      let newConversationId: string | undefined;
-      let workflowStarted = false;
-
-      void createConversation(run.codebaseId ?? undefined)
-        .then(({ conversationId }) => {
-          newConversationId = conversationId;
-          return runWorkflow(run.workflowName, conversationId, run.userMessage, {
-            forceFresh: true,
-          });
-        })
-        .then(() => {
-          workflowStarted = true;
-          void queryClient.invalidateQueries({ queryKey: ['workflow-runs-status'] });
-          void queryClient.invalidateQueries({ queryKey: ['conversations'] });
-          if (newConversationId) {
-            navigate(`/chat/${encodeURIComponent(newConversationId)}`);
-          }
-        })
-        .catch((err: unknown) => {
-          setRerunError(err instanceof Error ? err.message : 'Failed to run workflow again');
-          if (newConversationId !== undefined && !workflowStarted) {
-            void deleteConversation(newConversationId).catch((cleanupErr: unknown) => {
-              console.warn('[ChatPage] Failed to clean up failed workflow rerun conversation', {
-                conversationId: newConversationId,
-                error: cleanupErr instanceof Error ? cleanupErr.message : cleanupErr,
-              });
-            });
-          }
-        })
-        .finally(() => {
-          rerunningRef.current = false;
-          setRerunningWorkflowRunId(null);
-        });
+  const newChatMutation = useMutation({
+    mutationFn: () =>
+      createConversation(selectedTask?.codebase_id ?? undefined, undefined, selectedTask?.id),
+    onSuccess: result => {
+      if (!selectedTask) return;
+      void queryClient.invalidateQueries({ queryKey: ['task', selectedTask.id] });
+      void queryClient.invalidateQueries({ queryKey: ['tasks'] });
+      navigate(
+        `/chat/tasks/${encodeURIComponent(selectedTask.id)}/chats/${encodeURIComponent(result.conversationId)}`
+      );
     },
-    [navigate, queryClient]
-  );
+    onError: err => {
+      setTaskActionError(err instanceof Error ? err.message : 'Failed to start chat');
+    },
+  });
+
+  const archiveMutation = useMutation({
+    mutationFn: () => {
+      if (!taskId) throw new Error('No task selected');
+      return deleteTask(taskId);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['tasks'] });
+      navigate('/chat');
+    },
+    onError: err => {
+      setTaskActionError(err instanceof Error ? err.message : 'Failed to archive task');
+    },
+  });
 
   const handleAddSubmit = useCallback((): void => {
     const trimmed = addValue.trim();
@@ -247,15 +239,20 @@ export function ChatPage(): React.ReactElement {
         className="relative flex h-full flex-col border-r border-border bg-surface overflow-hidden"
         style={{ width: `${String(width)}px`, flexShrink: 0 }}
       >
-        {/* New Chat button */}
+        {/* New Task button */}
         <div className="px-3 pt-3 pb-2">
           <button
-            onClick={handleNewChat}
+            onClick={handleNewTask}
             className="flex w-full items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-accent-hover transition-colors"
           >
-            <MessageSquarePlus className="h-4 w-4 shrink-0" />
-            New Chat
+            <Plus className="h-4 w-4 shrink-0" />
+            New Task
           </button>
+          {taskActionError && (
+            <div className="mt-2 rounded-md border border-error/30 bg-error/10 px-2 py-1.5 text-[11px] text-error">
+              {taskActionError}
+            </div>
+          )}
         </div>
 
         {/* Project filter */}
@@ -328,12 +325,6 @@ export function ChatPage(): React.ReactElement {
 
         <Separator className="bg-border" />
 
-        {rerunError && (
-          <div className="mx-3 mt-2 rounded-md border border-error/30 bg-error/10 px-2 py-1.5 text-[11px] text-error">
-            {rerunError}
-          </div>
-        )}
-
         {/* Search */}
         <div className="px-3 py-2">
           <div className="relative">
@@ -350,56 +341,17 @@ export function ChatPage(): React.ReactElement {
           </div>
         </div>
 
-        {/* Conversation list */}
+        {/* Task list */}
         <ScrollArea className="flex-1 min-h-0 px-2 pb-2">
-          <div className="flex flex-col gap-0.5">
-            {filtered && filtered.length > 0 ? (
-              filtered.map(conv => {
-                // Workflow run conversation fields are internal DB IDs in /api/workflows/runs.
-                // Keep a platform-id fallback for compatibility if the API is enriched later.
-                const latestRun =
-                  latestWorkflowRunMap.get(conv.id) ??
-                  latestWorkflowRunMap.get(conv.platform_conversation_id);
-                return (
-                  <ConversationItem
-                    key={conv.id}
-                    conversation={conv}
-                    projectName={
-                      conv.codebase_id ? codebaseMap.get(conv.codebase_id)?.name : undefined
-                    }
-                    status={latestRun?.status ?? 'idle'}
-                    workflowRun={
-                      latestRun
-                        ? {
-                            id: latestRun.id,
-                            workflowName: latestRun.workflow_name,
-                            status: latestRun.status,
-                            userMessage: latestRun.user_message,
-                            codebaseId: latestRun.codebase_id,
-                          }
-                        : undefined
-                    }
-                    rerunningWorkflowRunId={rerunningWorkflowRunId}
-                    onRerunWorkflow={handleRerunWorkflow}
-                  />
-                );
-              })
-            ) : (
-              <div className="flex flex-col items-center justify-center gap-2 py-8 px-4">
-                <FolderGit2 className="h-8 w-8 text-text-tertiary" />
-                <span
-                  className={cn(
-                    'text-xs text-text-tertiary text-center',
-                    conversations && conversations.length > 0 ? '' : ''
-                  )}
-                >
-                  {conversations && conversations.length > 0
-                    ? 'No matching conversations'
-                    : 'No conversations yet — start a new chat!'}
-                </span>
-              </div>
-            )}
-          </div>
+          <TasksView
+            tasks={tasks}
+            archivedTasks={archivedTasks}
+            searchQuery={searchQuery}
+            getProject={task => (task.codebase_id ? codebaseMap.get(task.codebase_id) : undefined)}
+            onArchivedTask={archivedTaskId => {
+              if (archivedTaskId === taskId) navigate('/chat');
+            }}
+          />
         </ScrollArea>
 
         {/* Resize handle */}
@@ -409,9 +361,101 @@ export function ChatPage(): React.ReactElement {
         />
       </div>
 
-      {/* Right panel - chat interface */}
+      {/* Right panel - task workspace or legacy direct chat */}
       <div className="flex flex-1 flex-col overflow-hidden">
-        <ChatInterface key={conversationId ?? 'new'} conversationId={conversationId ?? 'new'} />
+        {taskId ? (
+          isLoadingTask ? (
+            <div className="flex flex-1 items-center justify-center text-text-tertiary">
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              Loading task...
+            </div>
+          ) : selectedTask ? (
+            conversationId ? (
+              <div className="flex flex-1 flex-col overflow-hidden">
+                <div className="flex items-center gap-3 border-b border-border bg-surface px-4 py-2">
+                  <Link
+                    to={`/chat/tasks/${encodeURIComponent(selectedTask.id)}`}
+                    className="inline-flex items-center gap-1 text-sm font-medium text-text-secondary hover:text-primary"
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                    {selectedTask.title}
+                  </Link>
+                  <span className="text-xs text-text-tertiary">Chat thread</span>
+                </div>
+                <ChatInterface key={conversationId} conversationId={conversationId} />
+              </div>
+            ) : (
+              <div className="flex flex-1 flex-col overflow-hidden">
+                <TaskHeader task={selectedTask} />
+                <div className="flex-1 overflow-auto p-6">
+                  <div className="mx-auto flex max-w-6xl flex-col gap-5">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="text-sm text-text-tertiary">
+                        {selectedTask.codebase_id
+                          ? (codebaseMap.get(selectedTask.codebase_id)?.name ?? 'Unknown project')
+                          : 'No project'}{' '}
+                        · {selectedTask.conversation_count} chat
+                        {selectedTask.conversation_count === 1 ? '' : 's'}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={(): void => {
+                            newChatMutation.mutate();
+                          }}
+                          disabled={newChatMutation.isPending}
+                          className="inline-flex items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 text-sm font-medium text-text-primary hover:bg-surface-elevated disabled:opacity-50"
+                        >
+                          {newChatMutation.isPending ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <MessageSquarePlus className="h-4 w-4" />
+                          )}
+                          New Chat
+                        </button>
+                        <button
+                          onClick={(): void => {
+                            archiveMutation.mutate();
+                          }}
+                          disabled={archiveMutation.isPending}
+                          className="inline-flex items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 text-sm font-medium text-text-secondary hover:bg-surface-elevated disabled:opacity-50"
+                        >
+                          {archiveMutation.isPending ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Archive className="h-4 w-4" />
+                          )}
+                          Archive
+                        </button>
+                      </div>
+                    </div>
+
+                    <TaskWorkflowRunner
+                      task={selectedTask}
+                      cwd={
+                        selectedTask.codebase_id
+                          ? codebaseMap.get(selectedTask.codebase_id)?.default_cwd
+                          : undefined
+                      }
+                    />
+                    <TaskConversationList
+                      taskId={selectedTask.id}
+                      conversations={selectedTask.conversations}
+                    />
+                  </div>
+                </div>
+              </div>
+            )
+          ) : (
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 text-text-tertiary">
+              <p>Task not found.</p>
+              <Link to="/chat" className="text-sm font-medium text-primary hover:underline">
+                Back to tasks
+              </Link>
+            </div>
+          )
+        ) : (
+          <ChatInterface key={conversationId ?? 'new'} conversationId={conversationId ?? 'new'} />
+        )}
       </div>
     </div>
   );

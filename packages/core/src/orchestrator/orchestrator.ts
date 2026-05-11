@@ -39,6 +39,7 @@ import {
 } from '../types';
 import type { WorkflowExecutionOptions } from '../types';
 import type { IsolationHints, IsolationEnvironmentRow } from '@archon/isolation';
+import { execFileAsync } from '@archon/git';
 import {
   IsolationBlockedError,
   IsolationResolver,
@@ -46,6 +47,7 @@ import {
   getIsolationProvider,
 } from '@archon/isolation';
 import * as db from '../db/conversations';
+import * as taskDb from '../db/tasks';
 import { createIsolationStore } from '../db/isolation-environments';
 import { toError } from '../utils/error';
 import { getCodebase } from '../db/codebases';
@@ -63,6 +65,34 @@ type IsolationResolution =
   | { status: 'existing'; cwd: string; env: IsolationEnvironmentRow }
   | { status: 'new'; cwd: string; env: IsolationEnvironmentRow }
   | { status: 'none'; cwd: string; env: null };
+
+async function getCheckedOutBranch(repoPath: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['-C', repoPath, 'rev-parse', '--abbrev-ref', 'HEAD'],
+      { timeout: 3000 }
+    );
+    const branch = stdout.trim();
+    return branch && branch !== 'HEAD' ? branch : null;
+  } catch (error) {
+    getLog().warn(
+      { err: toError(error), repoPath },
+      'task_primary_checkout_branch_detection_failed'
+    );
+    return null;
+  }
+}
+
+async function shouldUseTaskPrimaryCheckout(
+  conversation: Conversation,
+  codebase: Codebase,
+  hints?: IsolationHints
+): Promise<boolean> {
+  if (!conversation.task_id || hints?.workflowType !== 'pr' || !hints.prBranch) return false;
+  const currentBranch = await getCheckedOutBranch(codebase.default_cwd);
+  return currentBranch === hints.prBranch;
+}
 
 // Lazy resolver singleton
 let resolver: IsolationResolver | null = null;
@@ -114,6 +144,14 @@ export async function validateAndResolveIsolation(
   hints?: IsolationHints,
   _isRetry = false
 ): Promise<IsolationResolution> {
+  if (codebase && (await shouldUseTaskPrimaryCheckout(conversation, codebase, hints))) {
+    await db.updateConversation(conversation.id, {
+      cwd: codebase.default_cwd,
+      isolation_env_id: null,
+    });
+    return { status: 'none', cwd: codebase.default_cwd, env: null };
+  }
+
   const result = await getResolver().resolve({
     existingEnvId: conversation.isolation_env_id,
     codebase: codebase
@@ -253,6 +291,54 @@ export interface WorkflowRoutingContext {
   readonly workflowExecution?: WorkflowExecutionOptions;
 }
 
+function parsePrNumber(value: string | number | null | undefined): number | undefined {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) return value;
+  if (typeof value !== 'string') return undefined;
+  const match = /(?:\/pull\/|^)(\d+)(?:\D|$)/.exec(value.trim());
+  if (!match) return undefined;
+  const parsed = Number(match[1]);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function shouldDeriveTaskIsolationHints(hints?: IsolationHints): boolean {
+  return !hints?.workflowType || hints.workflowType === 'thread' || hints.workflowType === 'task';
+}
+
+/**
+ * Workflows launched from a task should operate on the task's branch/PR, not on
+ * a synthetic conversation thread branch. This is especially important for PR
+ * feedback workflows that apply and push fixes back to the PR head branch.
+ */
+export async function deriveTaskIsolationHints(
+  conversation: Pick<Conversation, 'task_id'>,
+  currentHints?: IsolationHints
+): Promise<IsolationHints | undefined> {
+  if (!conversation.task_id || !shouldDeriveTaskIsolationHints(currentHints)) {
+    return currentHints;
+  }
+
+  const task = await taskDb.getTask(conversation.task_id);
+  if (!task?.branch_name) return currentHints;
+
+  const prNumber = task.pr_number ?? parsePrNumber(task.pr_url);
+  if (prNumber || task.pr_url) {
+    return {
+      ...currentHints,
+      workflowType: 'pr',
+      workflowId: String(prNumber ?? conversation.task_id),
+      prBranch: task.branch_name as NonNullable<IsolationHints['prBranch']>,
+      linkedPRs: prNumber ? [prNumber] : currentHints?.linkedPRs,
+    };
+  }
+
+  return {
+    ...currentHints,
+    workflowType: 'task',
+    workflowId: conversation.task_id,
+    fromBranch: task.branch_name as NonNullable<IsolationHints['fromBranch']>,
+  };
+}
+
 /**
  * Dispatch a workflow to run in a background worker conversation (web platform only).
  * Creates a hidden worker conversation, sets up event bridging from worker to parent,
@@ -273,11 +359,29 @@ export async function dispatchBackgroundWorkflow(
 
   // 2. Create worker conversation in DB
   const workerConv = await db.getOrCreateConversation('web', workerPlatformId);
+  // Inherit task_id from the parent so worker runs aggregate under the same task.
+  // DB errors propagate — same posture as the surrounding updateConversation
+  // call. A silent task_id strip would make the worker's runs invisible in
+  // the task workspace UI; parent_conversation_id being null is the only
+  // expected "no task" path.
+  const parentConversation = await db.getConversationById(ctx.conversationDbId);
+  if (!parentConversation) {
+    throw new Error(
+      `Cannot dispatch workflow "${workflow.name}": parent conversation ${ctx.conversationDbId} not found`
+    );
+  }
   await db.updateConversation(workerConv.id, {
     cwd: ctx.cwd,
     codebase_id: ctx.codebaseId ?? null,
+    task_id: parentConversation.task_id ?? null,
     hidden: true,
   });
+  const workerConversation = {
+    ...workerConv,
+    cwd: ctx.cwd,
+    codebase_id: ctx.codebaseId ?? null,
+    task_id: parentConversation.task_id ?? null,
+  };
 
   // 3. Resolve isolation for this worker (each background workflow gets its own worktree).
   // Isolation failure is fatal — never run a workflow in a shared/parent worktree.
@@ -290,11 +394,14 @@ export async function dispatchBackgroundWorkflow(
       );
     }
     const result = await validateAndResolveIsolation(
-      workerConv,
+      workerConversation,
       codebase,
       ctx.platform,
       workerPlatformId,
-      { workflowType: 'thread', workflowId: workerPlatformId }
+      (await deriveTaskIsolationHints(parentConversation, ctx.isolationHints)) ?? {
+        workflowType: 'thread',
+        workflowId: workerPlatformId,
+      }
     );
     workerCwd = result.cwd;
     await db.updateConversation(workerConv.id, { cwd: workerCwd }).catch((e: unknown) => {

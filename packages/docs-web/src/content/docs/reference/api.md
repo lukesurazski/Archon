@@ -73,6 +73,7 @@ curl http://localhost:3090/api/conversations
 
 Query parameters:
 - `codebase_id` (optional) -- Filter by codebase
+- `taskId` (optional) -- Filter by task container
 - `include_deleted` (optional) -- Include soft-deleted conversations
 
 ### Create a Conversation
@@ -83,12 +84,12 @@ curl -X POST http://localhost:3090/api/conversations \
   -d '{}'
 ```
 
-Optionally specify a codebase:
+Optionally specify a codebase and/or attach to a task container:
 
 ```bash
 curl -X POST http://localhost:3090/api/conversations \
   -H "Content-Type: application/json" \
-  -d '{"codebase_id": "your-codebase-id"}'
+  -d '{"codebaseId": "your-codebase-id", "taskId": "your-task-id"}'
 ```
 
 Returns the created conversation with its `platform_conversation_id`.
@@ -128,6 +129,73 @@ curl -X DELETE http://localhost:3090/api/conversations/{id}
 ```
 
 Performs a soft delete -- the conversation is hidden but not destroyed.
+
+---
+
+## Tasks
+
+Task containers group related conversations and workflow runs under a single
+unit of work (typically a branch + PR). Tasks are a Web UI organizational
+concept; CLI and chat platforms operate on conversations directly.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET    | `/api/tasks`        | List task containers |
+| POST   | `/api/tasks`        | Create a task container |
+| GET    | `/api/tasks/{id}`   | Get a task with its conversations and workflow runs |
+| PATCH  | `/api/tasks/{id}`   | Update task fields (title, description, branch, PR, status) |
+| DELETE | `/api/tasks/{id}`   | Archive a task (soft-delete; `status` -> `archived`) |
+
+### List Tasks
+
+```bash
+curl http://localhost:3090/api/tasks
+```
+
+Query parameters:
+- `codebaseId` (optional) -- Filter by codebase
+- `status` (optional) -- `active` (default) or `archived`. Unknown values return 400.
+- `limit` (optional) -- 1..500, defaults to 100. Out-of-range values are clamped.
+
+### Create a Task
+
+```bash
+curl -X POST http://localhost:3090/api/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Add dark mode", "codebaseId": "your-codebase-id", "branchName": "feat/dark-mode"}'
+```
+
+Required: `title` (1..255 chars).
+Optional: `description`, `codebaseId`, `branchName`, `prUrl`, `prNumber`.
+
+### Get a Task
+
+```bash
+curl http://localhost:3090/api/tasks/{id}
+```
+
+Returns the task plus arrays of its `conversations` and `workflow_runs`.
+
+### Update a Task
+
+```bash
+curl -X PATCH http://localhost:3090/api/tasks/{id} \
+  -H "Content-Type: application/json" \
+  -d '{"prNumber": 123, "prUrl": "https://github.com/owner/repo/pull/123"}'
+```
+
+Body fields are independently nullable -- pass `null` to clear, omit to leave
+unchanged. `status` accepts `active` or `archived`.
+
+### Archive a Task
+
+```bash
+curl -X DELETE http://localhost:3090/api/tasks/{id}
+```
+
+Soft-archive: sets `status = 'archived'`. The task and its conversations remain
+in the database; archived tasks are hidden from the default list. Restore by
+PATCHing `status: "active"`.
 
 ---
 
@@ -263,6 +331,12 @@ Only user-defined workflows can be deleted. Bundled defaults cannot be removed.
 | POST | `/api/workflows/runs/{runId}/reject` | Reject a paused workflow |
 | DELETE | `/api/workflows/runs/{runId}` | Delete a terminal run and its events |
 
+The list endpoint accepts the following query parameters:
+- `status` (optional) -- Filter by run status (`pending`, `running`, `completed`, `failed`, `cancelled`, `paused`)
+- `codebaseId` (optional) -- Filter by codebase
+- `taskId` (optional) -- Filter by task container (matches runs whose direct or parent conversation is linked to the task)
+- `limit` (optional) -- Default 50
+
 #### Run a Workflow
 
 ```bash
@@ -394,7 +468,7 @@ curl http://localhost:3090/api/conversations/$CONV_ID/messages
 # 1. Create a conversation scoped to a codebase
 CONV_ID=$(curl -s -X POST http://localhost:3090/api/conversations \
   -H "Content-Type: application/json" \
-  -d '{"codebase_id": "your-codebase-id"}' | jq -r '.platform_conversation_id')
+  -d '{"codebaseId": "your-codebase-id"}' | jq -r '.platform_conversation_id')
 
 # 2. Start the workflow
 curl -X POST http://localhost:3090/api/workflows/archon-assist/run \

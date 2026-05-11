@@ -136,6 +136,123 @@ describe('SqliteAdapter', () => {
     });
   });
 
+  describe('tasks migration & backfill (gated by PRAGMA user_version)', () => {
+    test('creates remote_agent_tasks table and sets user_version >= 22 on fresh DB', async () => {
+      db = createTestDb();
+      const internalDb = (
+        db as unknown as { db: { prepare: (sql: string) => { get: () => unknown } } }
+      ).db;
+      const userVersion = (
+        internalDb.prepare('PRAGMA user_version').get() as {
+          user_version: number;
+        }
+      ).user_version;
+      // user_version is set after the gated backfill; on a fresh DB the
+      // SELECT returns zero rows but the gate still fires to mark the
+      // migration applied.
+      expect(userVersion).toBeGreaterThanOrEqual(22);
+
+      const tableExists = await db.query<{ name: string }>(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name='remote_agent_tasks'`
+      );
+      expect(tableExists.rows).toHaveLength(1);
+    });
+
+    test('adds task_id column to remote_agent_conversations', async () => {
+      db = createTestDb();
+      const internalDb = (
+        db as unknown as { db: { prepare: (sql: string) => { all: () => unknown } } }
+      ).db;
+      const cols = internalDb.prepare("PRAGMA table_info('remote_agent_conversations')").all() as {
+        name: string;
+      }[];
+      expect(cols.some(c => c.name === 'task_id')).toBe(true);
+    });
+
+    test('idx_conversations_task_id index is created', async () => {
+      db = createTestDb();
+      const result = await db.query<{ name: string }>(
+        `SELECT name FROM sqlite_master WHERE type='index' AND name='idx_conversations_task_id'`
+      );
+      expect(result.rows).toHaveLength(1);
+    });
+
+    test('compound workflow_runs indexes for taskSummarySelect are created', async () => {
+      db = createTestDb();
+      const result = await db.query<{ name: string }>(
+        `SELECT name FROM sqlite_master WHERE type='index' AND name IN
+         ('idx_workflow_runs_conv_started_at', 'idx_workflow_runs_parent_conv_started_at')`
+      );
+      expect(result.rows.length).toBe(2);
+    });
+
+    test('backfills one task per pre-existing visible conversation', async () => {
+      // Simulate a pre-existing DB: open once to create schema, force
+      // user_version=0, insert legacy conversations without task_id, then
+      // reopen to re-trigger the gated backfill.
+      db = createTestDb();
+      await insertCodebase(db, 'cb-legacy');
+      await db.query(
+        `INSERT INTO remote_agent_conversations
+         (id, platform_type, platform_conversation_id, codebase_id, task_id)
+         VALUES ($1, 'web', 'leg-1', $2, NULL)`,
+        ['conv-leg-1', 'cb-legacy']
+      );
+      // Wipe the existing tasks (created from the first open's backfill,
+      // which sees no conversations on a brand-new DB) and rewind the gate.
+      await db.query('DELETE FROM remote_agent_tasks');
+      const internalDb = (db as unknown as { db: { run: (sql: string) => void } }).db;
+      internalDb.run('UPDATE remote_agent_conversations SET task_id = NULL');
+      internalDb.run('PRAGMA user_version = 0');
+      await db.close();
+
+      // Reopen — initSchema triggers the backfill again.
+      db = new SqliteAdapter(currentDbPath);
+      const tasks = await db.query<{ id: string; title: string; codebase_id: string | null }>(
+        'SELECT id, title, codebase_id FROM remote_agent_tasks'
+      );
+      expect(tasks.rows).toHaveLength(1);
+      expect(tasks.rows[0].codebase_id).toBe('cb-legacy');
+
+      const conv = await db.query<{ task_id: string | null }>(
+        'SELECT task_id FROM remote_agent_conversations WHERE id = $1',
+        ['conv-leg-1']
+      );
+      expect(conv.rows[0].task_id).toBe(tasks.rows[0].id);
+    });
+
+    test('does NOT re-run backfill on subsequent opens (user_version gate is load-bearing)', async () => {
+      // This test exists specifically to catch a regression in the
+      // PRAGMA user_version < 22 gate. If a refactor breaks the gate, every
+      // server restart would create one fresh task row per existing
+      // conversation, producing duplicates proportional to restart count.
+      db = createTestDb();
+      await insertCodebase(db, 'cb-1');
+      await db.query(
+        `INSERT INTO remote_agent_conversations
+         (id, platform_type, platform_conversation_id, codebase_id)
+         VALUES ($1, 'web', 'leg-1', $2)`,
+        ['conv-1', 'cb-1']
+      );
+      // Pretend the user_version stayed bumped and pre-existing conversations
+      // are already assigned a task_id. A correct gate must not duplicate.
+      await db.query(`INSERT INTO remote_agent_tasks (id, title) VALUES ($1, $2)`, [
+        'existing-task',
+        'Existing',
+      ]);
+      await db.query(`UPDATE remote_agent_conversations SET task_id = $1 WHERE id = $2`, [
+        'existing-task',
+        'conv-1',
+      ]);
+      await db.close();
+
+      db = new SqliteAdapter(currentDbPath);
+      const tasks = await db.query<{ id: string }>('SELECT id FROM remote_agent_tasks');
+      // Only the originally inserted task should exist — no duplicates.
+      expect(tasks.rows.map(r => r.id)).toEqual(['existing-task']);
+    });
+  });
+
   describe('datetime() chronological vs lexical comparison', () => {
     // Documents the SQLite-specific bug fixed in getActiveWorkflowRunByPath.
     // `started_at` is TEXT in "YYYY-MM-DD HH:MM:SS" format. Comparing it

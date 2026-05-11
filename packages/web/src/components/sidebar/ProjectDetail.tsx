@@ -1,10 +1,11 @@
 import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router';
-import { listConversations, listWorkflowRuns, getCodebaseEnvironments } from '@/lib/api';
+import { listTasks, listWorkflowRuns, getCodebaseEnvironments } from '@/lib/api';
 import type { WorkflowRunResponse, IsolationEnvironment } from '@/lib/api';
-import { ConversationItem } from '@/components/conversations/ConversationItem';
 import { WorkflowInvoker } from '@/components/sidebar/WorkflowInvoker';
+import { TasksView } from '@/components/sidebar/TasksView';
+import { useCreateTaskFlow } from '@/hooks/useCreateTaskFlow';
 import { formatDuration } from '@/lib/format';
 import { cn } from '@/lib/utils';
 
@@ -38,11 +39,18 @@ export function ProjectDetail({
   searchQuery,
 }: ProjectDetailProps): React.ReactElement {
   const navigate = useNavigate();
+  const createTaskFlow = useCreateTaskFlow();
 
-  const { data: conversations, isError: isErrorConversations } = useQuery({
-    queryKey: ['conversations', { codebaseId }],
-    queryFn: () => listConversations(codebaseId),
+  const { data: tasks, isError: isErrorTasks } = useQuery({
+    queryKey: ['tasks', codebaseId],
+    queryFn: () => listTasks({ codebaseId }),
     refetchInterval: 10_000,
+  });
+
+  const { data: archivedTasks } = useQuery({
+    queryKey: ['tasks', codebaseId, 'archived'],
+    queryFn: () => listTasks({ codebaseId, status: 'archived', limit: 100 }),
+    refetchInterval: 30_000,
   });
 
   const { data: runs, isError: isErrorRuns } = useQuery({
@@ -62,36 +70,15 @@ export function ProjectDetail({
     [environments]
   );
 
-  const conversationStatusMap = useMemo((): Map<string, 'running' | 'failed'> => {
-    const map = new Map<string, 'running' | 'failed'>();
-    if (!runs) return map;
-    for (const run of runs) {
-      // For web runs, parent_conversation_id is the visible conversation in the sidebar.
-      // For CLI runs, conversation_id is the only conversation (no parent/worker split).
-      const key = run.parent_conversation_id ?? run.conversation_id;
-      if (run.status === 'running') {
-        map.set(key, 'running');
-      } else if (run.status === 'failed' && !map.has(key)) {
-        map.set(key, 'failed');
-      }
-    }
-    return map;
-  }, [runs]);
-
-  const handleNewChat = (): void => {
-    navigate('/chat');
+  const handleNewTask = (): void => {
+    createTaskFlow({ codebaseId }).catch((err: unknown) => {
+      console.warn('[ProjectDetail] createTask failed', err);
+    });
   };
 
   const handleRunClick = (run: WorkflowRunResponse): void => {
     navigate(`/workflows/runs/${run.id}`);
   };
-
-  // Filter conversations by search
-  const filteredConversations = conversations?.filter(conv => {
-    if (!searchQuery) return true;
-    const query = searchQuery.toLowerCase();
-    return (conv.title ?? conv.platform_conversation_id).toLowerCase().includes(query);
-  });
 
   // Filter and sort runs by search and status
   const sortedRuns = runs
@@ -114,35 +101,22 @@ export function ProjectDetail({
       </div>
 
       <button
-        onClick={handleNewChat}
+        onClick={handleNewTask}
         className="mx-1 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-accent-hover transition-colors"
       >
-        New Chat
+        New Task
       </button>
 
       <WorkflowInvoker codebaseId={codebaseId} />
 
-      {/* Conversations section */}
-      <div>
-        <span className="px-1 text-[11px] font-semibold uppercase tracking-wider text-text-tertiary">
-          Conversations
-        </span>
-        <div className="mt-1 flex flex-col gap-0.5">
-          {isErrorConversations ? (
-            <span className="px-1 text-xs text-error">Failed to load — retrying</span>
-          ) : filteredConversations && filteredConversations.length > 0 ? (
-            filteredConversations.map(conv => (
-              <ConversationItem
-                key={conv.id}
-                conversation={conv}
-                status={conversationStatusMap.get(conv.id) ?? 'idle'}
-              />
-            ))
-          ) : (
-            <span className="px-1 text-xs text-text-tertiary">No conversations</span>
-          )}
-        </div>
-      </div>
+      <TasksView
+        tasks={tasks}
+        archivedTasks={archivedTasks}
+        searchQuery={searchQuery}
+        isError={isErrorTasks}
+        getProject={() => ({ id: codebaseId, name: projectName })}
+        compact
+      />
 
       {/* Workflow runs section */}
       <div>

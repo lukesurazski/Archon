@@ -669,6 +669,34 @@ describe('workflows database', () => {
 
       expect(result).toEqual([mockWorkflowRun]);
     });
+
+    test('filters by taskId via OR of direct + parent conversation subqueries', async () => {
+      mockQuery.mockResolvedValueOnce(createQueryResult([]));
+
+      await listWorkflowRuns({ taskId: 'task-abc' });
+
+      const [query, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+      expect(query).toContain(
+        'conversation_id IN (SELECT id FROM remote_agent_conversations WHERE task_id ='
+      );
+      expect(query).toContain(
+        'parent_conversation_id IN (SELECT id FROM remote_agent_conversations WHERE task_id ='
+      );
+      // Both subqueries must reuse the same $N placeholder — guards against
+      // a refactor double-pushing the param.
+      expect(params.filter(p => p === 'task-abc')).toHaveLength(1);
+    });
+
+    test('combines taskId with status filter via AND', async () => {
+      mockQuery.mockResolvedValueOnce(createQueryResult([]));
+
+      await listWorkflowRuns({ taskId: 'task-abc', status: 'running' });
+
+      const [query] = mockQuery.mock.calls[0] as [string, unknown[]];
+      expect(query).toContain(' AND ');
+      expect(query).toContain('status IN');
+      expect(query).toContain('task_id =');
+    });
   });
 
   describe('failOrphanedRuns', () => {

@@ -24,6 +24,7 @@ export interface Conversation {
   platform_type: string;
   platform_conversation_id: string;
   codebase_id: string | null;
+  task_id: string | null;
   cwd: string | null;
   isolation_env_id: string | null; // UUID FK to isolation_environments
   ai_assistant_type: string;
@@ -31,6 +32,24 @@ export interface Conversation {
   hidden: boolean;
   deleted_at: Date | null;
   last_activity_at: Date | null; // For staleness detection
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface Task {
+  id: string;
+  title: string;
+  description: string | null;
+  codebase_id: string | null;
+  branch_name: string | null;
+  pr_url: string | null;
+  pr_number: number | null;
+  status: 'active' | 'archived';
+  // Date in both backends: node-postgres returns `Date` for TIMESTAMPTZ by
+  // default, and SQLite TEXT rows are coerced via `normalizeTaskSummary` in
+  // `tasks.ts` (mirrors `normalizeWorkflowRun`). Keeping this aligned with
+  // `Conversation`, `Codebase`, `Session` means internal consumers can rely
+  // on Date methods regardless of backend.
   created_at: Date;
   updated_at: Date;
 }

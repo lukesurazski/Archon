@@ -52,6 +52,31 @@ nodes:
 - These are mutually exclusive per node. If both are set, `allowed_tools` takes precedence.
 - Tool restrictions are currently supported for the Claude provider only. Codex nodes with `denied_tools` will log a warning; `allowed_tools` is not supported by the Codex SDK.
 
+## Path-Scoped Tool Execution (Workflow Engine)
+
+In addition to the per-tool `allowed_tools`/`denied_tools` whitelist, the workflow engine enforces a **path allowlist** on every provider tool call made inside a DAG node or loop iteration. Any file-touching tool whose target path falls outside the allowlist aborts the node with:
+
+```text
+Tool '<name>' in node '<id>' targeted path outside the workflow working path: <path>
+```
+
+This is a **non-retryable** failure -- the engine will not retry the node even when the workflow has `retry: { on_error: 'all' }`. The same guarantee applies to the tool-call timeout configured by [`ARCHON_WORKFLOW_TOOL_CALL_TIMEOUT_MS`](/reference/configuration/#workflow-engine): both are classified as safety errors via a structured `nonRetryable` flag on the node's output.
+
+**Default allowlist (per node):**
+
+- The node's working directory (`cwd`)
+- The workflow run's artifacts directory and its immediate parent
+- The workflow run's log directory and its immediate parent
+- For `Bash` only: `/tmp`, `/private/tmp`, and the OS tmpdir (Unix only -- Windows users get the system tmpdir)
+
+**Tools checked:** `Read`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Grep`, `Glob`, `LS`, and `Bash`. For `Bash`, the engine inspects the command string and only enforces the allowlist on commands that **may** mutate paths (e.g. `rm`, `rmdir`, `mv`, `cp`, `mkdir`, `touch`, `tee`, `chmod`, `chown`, `install`, `truncate`, `sed -i`, `git checkout/reset/clean/merge/rebase/pull/worktree`, output redirection to absolute paths, or here-docs). Read-only commands like `cat` and `find` are not enforced.
+
+The Bash detection is **best-effort** and intentionally conservative: paths reconstructed from variables, `$(...)` substitutions, or non-ASCII filenames may slip past the check. The guard is defense in depth, not a substitute for running untrusted code in a sandbox.
+
+This boundary is intentional: workflows run with `bypassPermissions`, so limiting their reach to the worktree + artifacts is the engine's primary defence against an accidental `rm -rf /` or `git checkout` of a sibling checkout.
+
+If you legitimately need a workflow to touch a sibling directory, run the operation through a `bash:` or `script:` node (which executes outside the provider tool path and is not subject to this guard).
+
 ## Data Privacy and Logging
 
 Archon uses structured logging (Pino) with explicit rules about what is and is not recorded.

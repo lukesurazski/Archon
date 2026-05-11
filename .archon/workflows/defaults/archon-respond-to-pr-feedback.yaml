@@ -1,0 +1,301 @@
+name: archon-respond-to-pr-feedback
+description: |
+  Use when: Address external review feedback (CodeRabbit, Claude Code review, human
+            reviewers) on a PR. Treats every external comment as HIGH severity, applies
+            fixes via archon-implement-review-fixes, validates, commits, and pushes.
+  Triggers (manual): "address feedback on PR #N", "respond to review comments",
+                     "fix CodeRabbit comments", "fix the review feedback".
+  Auto-triggers (after webhook patch): pull_request_review.submitted with state in
+            {changes_requested, commented}; pull_request_review_comment.created.
+  NOT for: Generating reviews of a PR (use archon-comprehensive-pr-review for that),
+           addressing already-approved reviews (no fixes needed).
+
+  Configuration (env vars in Archon's process environment):
+    ARCHON_PR_FEEDBACK_MAX_ITERATIONS    review->fix cycles allowed per PR.
+                                         Default: 5.
+    ARCHON_PR_FEEDBACK_AUTHOR_ALLOWLIST  comma-separated GitHub usernames whose PRs
+                                         this workflow may operate on. Required;
+                                         workflow refuses to run if unset. Set this
+                                         to your Multica bot user(s).
+
+  This workflow uses the provided PR input when present and falls back to the PR
+  matching the current worktree's branch. The webhook adapter (or CLI invoker)
+  is responsible for ensuring the worktree is checked out on the PR branch when
+  no explicit PR input is provided.
+
+inputs:
+  - name: pr
+    type: pull_request
+    label: Pull request
+    description: PR number or GitHub pull request URL with feedback to address.
+    placeholder: "123 or https://github.com/owner/repo/pull/123"
+    required: true
+
+nodes:
+  - id: gate-author
+    bash: |
+      set -euo pipefail
+      if [ -z "${ARCHON_PR_FEEDBACK_AUTHOR_ALLOWLIST:-}" ]; then
+        echo "FATAL: ARCHON_PR_FEEDBACK_AUTHOR_ALLOWLIST is unset." >&2
+        echo "Set it to a comma-separated list of GitHub usernames whose PRs this" >&2
+        echo "workflow is allowed to operate on (e.g. your Multica bot user)." >&2
+        exit 1
+      fi
+      mkdir -p "$ARTIFACTS_DIR"
+      REPO=$(git remote get-url origin | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##')
+      # PR number: prefer the workflow argument (Archon substitutes $ARGUMENTS at
+      # workflow-load time; empty string when no argument was passed), then fall
+      # back to the PR matching the current worktree branch.
+      ARGS="$ARGUMENTS"
+      PR_NUMBER=""
+      if [ -n "$ARGS" ]; then
+        PR_NUMBER=$(echo "$ARGS" | grep -oE '[0-9]+' | head -1 || true)
+      fi
+      if [ -z "$PR_NUMBER" ]; then
+        PR_NUMBER=$(gh pr view --repo "$REPO" --json number -q '.number' 2>/dev/null || true)
+      fi
+      if [ -z "$PR_NUMBER" ]; then
+        echo "FATAL: could not determine PR number from workflow arguments or current branch." >&2
+        exit 1
+      fi
+      AUTHOR=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json author -q '.author.login')
+      echo "$ARCHON_PR_FEEDBACK_AUTHOR_ALLOWLIST" | tr ',' '\n' \
+        | sed 's/^[ \t]*//;s/[ \t]*$//' \
+        | grep -Fxq "$AUTHOR" || {
+          echo "PR #$PR_NUMBER author '$AUTHOR' not in allowlist; aborting." >&2
+          exit 1
+        }
+      echo "$PR_NUMBER" > "$ARTIFACTS_DIR/.pr-number"
+      echo "ok"
+
+  - id: gate-iterations
+    depends_on: [gate-author]
+    bash: |
+      set -euo pipefail
+      MAX="${ARCHON_PR_FEEDBACK_MAX_ITERATIONS:-5}"
+      PR_NUMBER=$(cat "$ARTIFACTS_DIR/.pr-number")
+      STATE_DIR=".archon/state/pr-feedback"
+      mkdir -p "$STATE_DIR"
+      COUNT_FILE="$STATE_DIR/pr-${PR_NUMBER}.iterations"
+      COUNT=$(cat "$COUNT_FILE" 2>/dev/null || echo 0)
+      if [ "$COUNT" -ge "$MAX" ]; then
+        echo "Reached max iterations ($MAX) for PR #$PR_NUMBER. Stopping." >&2
+        REPO=$(git remote get-url origin | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##')
+        gh pr comment "$PR_NUMBER" --repo "$REPO" --body \
+          "**Archon**: reached max review-fix iterations (\`$MAX\`). Human attention needed - please address remaining feedback manually or raise the cap via \`ARCHON_PR_FEEDBACK_MAX_ITERATIONS\`." \
+          || true
+        exit 1
+      fi
+      echo "$COUNT iteration(s) used of $MAX (will increment only if actionable feedback found)"
+
+  - id: wait-for-review-activity
+    depends_on: [gate-iterations]
+    timeout: 1800000
+    bash: |
+      set -euo pipefail
+      # Wait for all PR checks (CodeRabbit, CI, other review bots) to reach
+      # terminal state. Falls back to comment-count stability if the PR has
+      # no checks at all.
+      #
+      # Tunables (seconds):
+      INITIAL_WAIT="${ARCHON_PR_FEEDBACK_INITIAL_WAIT:-20}"     # let checks register
+      POLL_INTERVAL="${ARCHON_PR_FEEDBACK_POLL_INTERVAL:-15}"
+      GRACE_PERIOD="${ARCHON_PR_FEEDBACK_GRACE:-30}"            # after all checks done, wait for trailing comments
+      STABILITY_WINDOW="${ARCHON_PR_FEEDBACK_STABILITY:-60}"    # used only when there are no checks
+      MAX_WAIT="${ARCHON_PR_FEEDBACK_MAX_WAIT:-900}"            # 15 min cap
+
+      PR_NUMBER=$(cat "$ARTIFACTS_DIR/.pr-number")
+      REPO=$(git remote get-url origin | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##')
+
+      # CheckRun: status in (QUEUED, IN_PROGRESS, WAITING, PENDING, REQUESTED) => in-flight
+      # StatusContext: state in (PENDING, EXPECTED) => in-flight
+      # Anything else (COMPLETED, SUCCESS, FAILURE, ERROR) => terminal.
+      pending_filter='[.[] | select(
+        ((.status // empty)|tostring) as $s
+        | ((.state  // empty)|tostring) as $st
+        | ($s != "" and $s != "COMPLETED") or
+          ($st != "" and ($st == "PENDING" or $st == "EXPECTED"))
+      )]'
+
+      count_feedback() {
+        local inline reviews top
+        inline=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/comments" --jq 'length' 2>/dev/null || echo 0)
+        reviews=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" --jq 'length' 2>/dev/null || echo 0)
+        top=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq 'length' 2>/dev/null || echo 0)
+        echo $((inline + reviews + top))
+      }
+
+      has_review_in_progress() {
+        gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+          --jq '[.[] | select(
+            ((.user.login // "") | test("^(coderabbitai|coderabbitai\\[bot\\])$"; "i")) and
+            ((.body // "") | test("review in progress|currently processing new changes|please wait"; "i"))
+          )] | length' 2>/dev/null || echo 0
+      }
+
+      echo "initial wait ${INITIAL_WAIT}s for checks to register"
+      sleep "$INITIAL_WAIT"
+
+      elapsed="$INITIAL_WAIT"
+      last_fb=-1
+      stable=0
+      saw_checks=0
+
+      while [ "$elapsed" -lt "$MAX_WAIT" ]; do
+        rollup=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json statusCheckRollup -q '.statusCheckRollup' 2>/dev/null || echo '[]')
+        total=$(echo "$rollup" | jq 'length')
+        [ "$total" -gt 0 ] && saw_checks=1
+
+        if [ "$saw_checks" = "1" ]; then
+          pending=$(echo "$rollup" | jq "$pending_filter | length")
+          if [ "$pending" = "0" ]; then
+            echo "  t=${elapsed}s  all ${total} checks terminal - grace period ${GRACE_PERIOD}s for trailing comments"
+            sleep "$GRACE_PERIOD"
+            in_progress=$(has_review_in_progress)
+            if [ "$in_progress" -gt 0 ]; then
+              echo "  t=$((elapsed + GRACE_PERIOD))s  review bot still processing (${in_progress} in-progress comment(s)); continuing to poll"
+              elapsed=$((elapsed + GRACE_PERIOD))
+              sleep "$POLL_INTERVAL"
+              elapsed=$((elapsed + POLL_INTERVAL))
+              continue
+            else
+              exit 0
+            fi
+          else
+            names=$(echo "$rollup" | jq -r "$pending_filter | .[] | (.name // .context // \"unknown\")" | tr '\n' ',' | sed 's/,$//')
+            echo "  t=${elapsed}s  ${pending}/${total} pending: ${names}"
+          fi
+        else
+          # No checks. Fall back to comment-count stability.
+          cur=$(count_feedback)
+          in_progress=$(has_review_in_progress)
+          echo "  t=${elapsed}s  no_checks  feedback_items=${cur}  review_in_progress=${in_progress}  stable_for=${stable}s"
+          if [ "$in_progress" -gt 0 ]; then
+            stable=0
+            last_fb="$cur"
+            sleep "$POLL_INTERVAL"
+            elapsed=$((elapsed + POLL_INTERVAL))
+            continue
+          fi
+          if [ "$cur" = "$last_fb" ]; then
+            stable=$((stable + POLL_INTERVAL))
+            if [ "$cur" -gt 0 ] && [ "$stable" -ge "$STABILITY_WINDOW" ]; then
+              echo "no checks; comments stable at ${cur} for ${stable}s - proceeding"
+              exit 0
+            fi
+          else
+            stable=0
+            last_fb="$cur"
+          fi
+        fi
+
+        sleep "$POLL_INTERVAL"
+        elapsed=$((elapsed + POLL_INTERVAL))
+      done
+      echo "hit MAX_WAIT (${MAX_WAIT}s) - proceeding anyway (synthesize will no-op if empty)"
+
+  - id: fetch-feedback
+    depends_on: [wait-for-review-activity]
+    bash: |
+      set -euo pipefail
+      mkdir -p "$ARTIFACTS_DIR/review"
+      PR_NUMBER=$(cat "$ARTIFACTS_DIR/.pr-number")
+      REPO=$(git remote get-url origin | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##')
+      OWNER="${REPO%%/*}"
+      REPO_NAME="${REPO##*/}"
+
+      gh pr view "$PR_NUMBER" --repo "$REPO" \
+        --json reviews,comments,headRefName,headRefOid,author,state \
+        > "$ARTIFACTS_DIR/review/pr-meta.json"
+
+      gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/comments" \
+        > "$ARTIFACTS_DIR/review/inline-comments.json"
+
+      gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
+        > "$ARTIFACTS_DIR/review/reviews.json"
+
+      # Resolved-thread state lives only in GraphQL.
+      gh api graphql -f query='
+        query($owner:String!, $repo:String!, $pr:Int!) {
+          repository(owner:$owner, name:$repo) {
+            pullRequest(number:$pr) {
+              reviewThreads(first:100) {
+                nodes {
+                  isResolved
+                  isOutdated
+                  comments(first:50) { nodes { databaseId } }
+                }
+              }
+            }
+          }
+        }' -F owner="$OWNER" -F repo="$REPO_NAME" -F pr="$PR_NUMBER" \
+        > "$ARTIFACTS_DIR/review/review-threads.json"
+
+      echo "fetched"
+
+  - id: synthesize-external
+    depends_on: [fetch-feedback]
+    command: archon-synthesize-external-review
+
+  - id: check-actionable
+    depends_on: [synthesize-external]
+    bash: |
+      if [ -s "$ARTIFACTS_DIR/review/consolidated-review.md" ] \
+         && grep -q "^## HIGH Issues" "$ARTIFACTS_DIR/review/consolidated-review.md"; then
+        echo "actionable"
+      else
+        echo "no-actionable-feedback"
+      fi
+
+  - id: implement
+    depends_on: [record-head-before-implement]
+    when: "$check-actionable.output == 'actionable'"
+    command: archon-implement-review-fixes
+
+  - id: record-head-before-implement
+    depends_on: [check-actionable]
+    when: "$check-actionable.output == 'actionable'"
+    bash: |
+      set -euo pipefail
+      git rev-parse HEAD > "$ARTIFACTS_DIR/.pre-implement-head"
+      echo "recorded pre-implement HEAD"
+
+  - id: verify-implementation
+    depends_on: [implement]
+    bash: |
+      set -euo pipefail
+      REPORT="$ARTIFACTS_DIR/review/fix-report.md"
+      if [ ! -s "$REPORT" ]; then
+        echo "FATAL: implementation step did not write $REPORT" >&2
+        exit 1
+      fi
+      if grep -Eiq '^\*\*Status\*\*:[[:space:]]*BLOCKED|^Status:[[:space:]]*BLOCKED|BLOCKED[[:space:]]+—[[:space:]]+fixes not applied' "$REPORT"; then
+        echo "FATAL: implementation step reported BLOCKED; leaving workflow failed instead of completed." >&2
+        exit 1
+      fi
+      BEFORE=$(cat "$ARTIFACTS_DIR/.pre-implement-head")
+      AFTER=$(git rev-parse HEAD)
+      if [ "$BEFORE" = "$AFTER" ]; then
+        echo "FATAL: implementation step produced no new commit." >&2
+        exit 1
+      fi
+      echo "implementation verified"
+
+  - id: bump-iteration
+    depends_on: [verify-implementation]
+    bash: |
+      set -euo pipefail
+      PR_NUMBER=$(cat "$ARTIFACTS_DIR/.pr-number")
+      STATE_DIR=".archon/state/pr-feedback"
+      mkdir -p "$STATE_DIR"
+      COUNT_FILE="$STATE_DIR/pr-${PR_NUMBER}.iterations"
+      COUNT=$(cat "$COUNT_FILE" 2>/dev/null || echo 0)
+      echo $((COUNT + 1)) > "$COUNT_FILE"
+      echo "iteration $((COUNT + 1)) recorded"
+
+  - id: report-noop
+    depends_on: [check-actionable]
+    when: "$check-actionable.output == 'no-actionable-feedback'"
+    bash: |
+      PR_NUMBER=$(cat "$ARTIFACTS_DIR/.pr-number")
+      echo "No actionable HIGH-severity feedback for PR #$PR_NUMBER (resolved threads, approvals, or bot's own comments only). Nothing to do."

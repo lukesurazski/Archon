@@ -2,9 +2,10 @@
 -- Version: Combined (final state after migrations 001-020)
 -- Description: Complete database schema (idempotent - safe to run multiple times)
 --
--- 8 Tables:
+-- 9 Tables:
 --   1. remote_agent_codebases
 --   1b. remote_agent_codebase_env_vars
+--   1c. remote_agent_tasks
 --   2. remote_agent_conversations
 --   3. remote_agent_sessions
 --   4. remote_agent_isolation_environments
@@ -60,6 +61,31 @@ COMMENT ON TABLE remote_agent_codebase_env_vars IS
   'Per-project env vars merged into Options.env on Claude SDK calls. Managed via Web UI or config.';
 
 -- ============================================================================
+-- Table 1c: Tasks
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS remote_agent_tasks (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  title VARCHAR(255) NOT NULL,
+  description TEXT,
+  codebase_id UUID REFERENCES remote_agent_codebases(id) ON DELETE SET NULL,
+  branch_name VARCHAR(500),
+  pr_url VARCHAR(1000),
+  pr_number INTEGER,
+  status VARCHAR(20) NOT NULL DEFAULT 'active',
+  created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_codebase
+  ON remote_agent_tasks(codebase_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_status
+  ON remote_agent_tasks(status);
+
+COMMENT ON TABLE remote_agent_tasks IS
+  'Task containers grouping conversations, workflow runs, branch metadata, and PR links.';
+
+-- ============================================================================
 -- Table 2: Conversations
 -- ============================================================================
 
@@ -68,6 +94,7 @@ CREATE TABLE IF NOT EXISTS remote_agent_conversations (
   platform_type VARCHAR(20) NOT NULL,
   platform_conversation_id VARCHAR(255) NOT NULL,
   codebase_id UUID REFERENCES remote_agent_codebases(id) ON DELETE SET NULL,
+  task_id UUID REFERENCES remote_agent_tasks(id) ON DELETE SET NULL,
   cwd VARCHAR(500),
   ai_assistant_type VARCHAR(20) DEFAULT 'claude',
   isolation_env_id UUID,  -- FK added after isolation_environments table exists
@@ -80,12 +107,21 @@ CREATE TABLE IF NOT EXISTS remote_agent_conversations (
   UNIQUE(platform_type, platform_conversation_id)
 );
 
+-- Pre-task installations created remote_agent_conversations without task_id.
+-- Re-running this combined migration is a no-op for CREATE TABLE IF NOT EXISTS,
+-- so we add the column idempotently before any index references it.
+ALTER TABLE remote_agent_conversations
+  ADD COLUMN IF NOT EXISTS task_id UUID
+    REFERENCES remote_agent_tasks(id) ON DELETE SET NULL;
+
 CREATE INDEX IF NOT EXISTS idx_remote_agent_conversations_codebase
   ON remote_agent_conversations(codebase_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_hidden
   ON remote_agent_conversations(hidden);
 CREATE INDEX IF NOT EXISTS idx_conversations_codebase
   ON remote_agent_conversations(codebase_id) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_conversations_task_id
+  ON remote_agent_conversations(task_id);
 
 COMMENT ON COLUMN remote_agent_conversations.isolation_env_id IS
   'UUID reference to isolation_environments table (the only isolation reference)';
@@ -205,6 +241,11 @@ CREATE INDEX IF NOT EXISTS idx_workflow_runs_status
   ON remote_agent_workflow_runs(status);
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_parent_conv
   ON remote_agent_workflow_runs(parent_conversation_id);
+-- Compound indexes used by tasks.ts taskSummarySelect() — see migrations/022_tasks.sql
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_conv_started_at
+  ON remote_agent_workflow_runs(conversation_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_parent_conv_started_at
+  ON remote_agent_workflow_runs(parent_conversation_id, started_at DESC);
 
 -- Partial index for efficient staleness queries on running workflows
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_last_activity

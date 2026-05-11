@@ -64,6 +64,8 @@ psql $DATABASE_URL < migrations/017_drop_command_templates.sql
 psql $DATABASE_URL < migrations/018_fix_workflow_status_default.sql
 psql $DATABASE_URL < migrations/019_workflow_resume_path.sql
 psql $DATABASE_URL < migrations/020_codebase_env_vars.sql
+psql $DATABASE_URL < migrations/021_add_allow_env_keys_to_codebases.sql
+psql $DATABASE_URL < migrations/022_tasks.sql
 ```
 
 ## Local PostgreSQL via Docker
@@ -94,13 +96,15 @@ docker compose exec postgres psql -U postgres -d remote_coding_agent
 \i /migrations/018_fix_workflow_status_default.sql
 \i /migrations/019_workflow_resume_path.sql
 \i /migrations/020_codebase_env_vars.sql
+\i /migrations/021_add_allow_env_keys_to_codebases.sql
+\i /migrations/022_tasks.sql
 \q
 ```
 
 Or from your host machine (requires `psql` installed):
 
 ```bash
-psql postgresql://postgres:postgres@localhost:5432/remote_coding_agent < migrations/020_codebase_env_vars.sql
+psql postgresql://postgres:postgres@localhost:5432/remote_coding_agent < migrations/022_tasks.sql
 # ... and so on for each migration not yet applied
 ```
 
@@ -119,7 +123,7 @@ psql $DATABASE_URL -c "\dt"
 
 ## Schema Overview
 
-The database has 8 tables, all prefixed with `remote_agent_`:
+The database has 9 tables, all prefixed with `remote_agent_`:
 
 1. **`remote_agent_codebases`** - Repository metadata
    - Commands stored as JSONB: `{command_name: {path, description}}`
@@ -129,6 +133,7 @@ The database has 8 tables, all prefixed with `remote_agent_`:
 2. **`remote_agent_conversations`** - Platform conversation tracking
    - Platform type + conversation ID (unique constraint)
    - Linked to codebase via foreign key
+   - Linked to a task container via nullable `task_id` (SET NULL on task delete)
    - AI assistant type locked at creation
 
 3. **`remote_agent_sessions`** - AI session management
@@ -160,6 +165,15 @@ The database has 8 tables, all prefixed with `remote_agent_`:
    - Injected into Claude SDK subprocess environment at execution time
    - Managed via Web UI Settings panel; `env:` in `.archon/config.yaml` for CLI users
 
+9. **`remote_agent_tasks`** - Task containers for Web UI organization
+   - Groups related conversations and workflow runs under a single user-facing
+     unit of work (title, description, branch name, PR URL/number)
+   - `status`: `active` | `archived` — `DELETE /api/tasks/{id}` is a soft-archive
+     that sets `status = 'archived'`; conversations are preserved
+   - On the first SQLite migration (gated by `PRAGMA user_version`), one task is
+     auto-created per existing non-deleted conversation and the conversation's
+     `task_id` is back-filled. The PostgreSQL equivalent runs in `022_tasks.sql`
+
 ## Migration List
 
 | Migration | Description |
@@ -185,3 +199,5 @@ The database has 8 tables, all prefixed with `remote_agent_`:
 | `018_fix_workflow_status_default.sql` | Fix workflow status default value |
 | `019_workflow_resume_path.sql` | Workflow resume path support |
 | `020_codebase_env_vars.sql` | Per-project environment variables |
+| `021_add_allow_env_keys_to_codebases.sql` | Whitelist of env var keys per codebase |
+| `022_tasks.sql` | Task containers (`remote_agent_tasks`) + `task_id` FK on conversations; auto-backfills one task per existing conversation |

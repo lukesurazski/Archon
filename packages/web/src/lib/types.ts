@@ -6,7 +6,13 @@
 import type { components } from '@/lib/api.generated';
 
 export type WorkflowRunStatus = components['schemas']['WorkflowRunStatus'];
-export type WorkflowStepStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+export type WorkflowStepStatus =
+  | 'pending'
+  | 'running'
+  | 'blocked'
+  | 'completed'
+  | 'failed'
+  | 'skipped';
 export type ArtifactType = 'pr' | 'commit' | 'file_created' | 'file_modified' | 'branch';
 
 // Base SSE event
@@ -118,7 +124,7 @@ export interface DagNodeEvent extends BaseSSEEvent {
   status: WorkflowStepStatus;
   duration?: number;
   error?: string;
-  reason?: 'when_condition' | 'trigger_rule';
+  reason?: string;
   providerId?: string;
   authMode?: string;
   credentialHint?: string;
@@ -250,7 +256,7 @@ export interface DagNodeState {
   status: WorkflowStepStatus;
   duration?: number;
   error?: string;
-  reason?: 'when_condition' | 'trigger_rule';
+  reason?: string;
   providerId?: string;
   authMode?: string;
   credentialHint?: string;

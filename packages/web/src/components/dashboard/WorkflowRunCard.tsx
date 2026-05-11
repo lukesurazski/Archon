@@ -151,7 +151,7 @@ export function WorkflowRunCard({
   const liveState = useWorkflowStore(state => state.workflows.get(run.id));
 
   useEffect(() => {
-    if (run.status !== 'running' && run.status !== 'paused') return;
+    if (run.status !== 'running' && run.status !== 'paused' && run.status !== 'blocked') return;
     const interval = setInterval(() => {
       setElapsed(formatDuration(run.started_at, null));
     }, 1000);
@@ -177,7 +177,7 @@ export function WorkflowRunCard({
           className={cn(
             'h-2.5 w-2.5 shrink-0 rounded-full',
             run.status === 'running' && 'bg-primary animate-pulse',
-            run.status === 'paused' && 'bg-warning animate-pulse',
+            (run.status === 'paused' || run.status === 'blocked') && 'bg-warning animate-pulse',
             run.status === 'pending' && 'bg-text-tertiary'
           )}
         />
@@ -188,7 +188,7 @@ export function WorkflowRunCard({
           className={cn(
             'inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium',
             run.status === 'running' && 'bg-primary/10 text-primary',
-            run.status === 'paused' && 'bg-warning/10 text-warning',
+            (run.status === 'paused' || run.status === 'blocked') && 'bg-warning/10 text-warning',
             run.status === 'pending' && 'bg-surface-elevated text-text-secondary'
           )}
         >
@@ -376,7 +376,7 @@ export function WorkflowRunCard({
               }}
             />
           )}
-          {(run.status === 'running' || run.status === 'pending') && (
+          {(run.status === 'running' || run.status === 'pending' || run.status === 'blocked') && (
             <ConfirmRunActionDialog
               trigger={
                 <button className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-error/80 hover:bg-error/10 hover:text-error transition-colors">
@@ -397,27 +397,30 @@ export function WorkflowRunCard({
               }}
             />
           )}
-          {onDelete && run.status !== 'running' && run.status !== 'pending' && (
-            <ConfirmRunActionDialog
-              trigger={
-                <button className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-text-tertiary hover:bg-error/10 hover:text-error transition-colors">
-                  <Trash2 className="h-3.5 w-3.5" />
-                  Delete
-                </button>
-              }
-              title="Delete workflow run?"
-              description={
-                <>
-                  Permanently delete the run record for <strong>{run.workflow_name}</strong> and its
-                  events. This cannot be undone.
-                </>
-              }
-              confirmLabel="Delete"
-              onConfirm={(): void => {
-                onDelete(run.id);
-              }}
-            />
-          )}
+          {onDelete &&
+            (run.status === 'completed' ||
+              run.status === 'failed' ||
+              run.status === 'cancelled') && (
+              <ConfirmRunActionDialog
+                trigger={
+                  <button className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-text-tertiary hover:bg-error/10 hover:text-error transition-colors">
+                    <Trash2 className="h-3.5 w-3.5" />
+                    Delete
+                  </button>
+                }
+                title="Delete workflow run?"
+                description={
+                  <>
+                    Permanently delete the run record for <strong>{run.workflow_name}</strong> and
+                    its events. This cannot be undone.
+                  </>
+                }
+                confirmLabel="Delete"
+                onConfirm={(): void => {
+                  onDelete(run.id);
+                }}
+              />
+            )}
         </div>
       </div>
     </div>

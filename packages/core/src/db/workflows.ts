@@ -28,12 +28,15 @@ class WorkflowRunGuardError extends Error {}
  * Normalize a WorkflowRun row from the database.
  * SQLite stores metadata as TEXT (JSON string), PostgreSQL returns parsed objects.
  * This ensures metadata is always a parsed object regardless of database backend.
+ * Malformed metadata is logged and falls back to {} so a single corrupt row
+ * does not 500 list endpoints.
  */
-function normalizeWorkflowRun<T extends WorkflowRun>(row: T): T {
+export function normalizeWorkflowRun<T extends WorkflowRun>(row: T): T {
   if (typeof row.metadata === 'string') {
     try {
       row.metadata = JSON.parse(row.metadata) as Record<string, unknown>;
-    } catch {
+    } catch (e) {
+      getLog().warn({ runId: row.id, err: e as Error }, 'db.workflow_run_metadata_parse_failed');
       row.metadata = {};
     }
   }
@@ -187,7 +190,7 @@ export async function getPausedWorkflowRun(conversationId: string): Promise<Work
 /**
  * Find the workflow run currently holding the lock on `workingPath`.
  *
- * The lock is held by any row in `(running, paused)` or `pending` younger
+ * The lock is held by any row in `(running, paused, blocked)` or `pending` younger
  * than `STALE_PENDING_AGE_MS` (orphaned pre-creates beyond that window are
  * ignored — they're from crashed or resume-replaced dispatches).
  *
@@ -217,7 +220,7 @@ export async function getActiveWorkflowRunByPath(
   const params: unknown[] = [workingPath];
   const clauses: string[] = [
     'working_path = $1',
-    `(status IN ('running', 'paused') OR (status = 'pending' AND started_at > ${stalePendingCutoff}))`,
+    `(status IN ('running', 'paused', 'blocked') OR (status = 'pending' AND started_at > ${stalePendingCutoff}))`,
   ];
   if (self !== undefined) {
     params.push(self.id);
@@ -655,6 +658,7 @@ export interface DashboardRunsResult {
     cancelled: number;
     pending: number;
     paused: number;
+    blocked: number;
   };
 }
 
@@ -796,6 +800,7 @@ export async function listDashboardRuns(
       cancelled: 0,
       pending: 0,
       paused: 0,
+      blocked: 0,
     };
     for (const row of countResult.rows) {
       const n = Number(row.cnt);
@@ -826,6 +831,7 @@ export async function listWorkflowRuns(options?: {
   status?: WorkflowRunStatus | WorkflowRunStatus[];
   limit?: number;
   codebaseId?: string;
+  taskId?: string;
 }): Promise<WorkflowRun[]> {
   const whereClauses: string[] = [];
   const values: unknown[] = [];
@@ -847,6 +853,13 @@ export async function listWorkflowRuns(options?: {
     values.push(options.codebaseId);
     whereClauses.push(
       `conversation_id IN (SELECT id FROM remote_agent_conversations WHERE codebase_id = $${String(values.length)})`
+    );
+  }
+  if (options?.taskId) {
+    values.push(options.taskId);
+    const taskParam = `$${String(values.length)}`;
+    whereClauses.push(
+      `(conversation_id IN (SELECT id FROM remote_agent_conversations WHERE task_id = ${taskParam}) OR parent_conversation_id IN (SELECT id FROM remote_agent_conversations WHERE task_id = ${taskParam}))`
     );
   }
 

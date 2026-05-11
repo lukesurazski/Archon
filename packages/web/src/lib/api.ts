@@ -26,12 +26,35 @@ export interface ConversationResponse {
   platform_type: string;
   platform_conversation_id: string;
   codebase_id: string | null;
+  task_id: string | null;
   cwd: string | null;
   ai_assistant_type: string;
   title: string | null;
   last_activity_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface TaskResponse {
+  id: string;
+  title: string;
+  description: string | null;
+  codebase_id: string | null;
+  branch_name: string | null;
+  pr_url: string | null;
+  pr_number: number | null;
+  status: 'active' | 'archived';
+  created_at: string;
+  updated_at: string;
+  conversation_count: number;
+  latest_run_status: WorkflowRunStatus | null;
+  latest_run_started_at: string | null;
+  last_activity_at: string | null;
+}
+
+export interface TaskDetailResponse extends TaskResponse {
+  conversations: ConversationResponse[];
+  workflow_runs: WorkflowRunResponse[];
 }
 
 export interface CodebaseResponse {
@@ -147,25 +170,87 @@ export async function listProviderDiagnostics(): Promise<ProviderDiagnostics[]> 
 }
 
 // Conversations
-export async function listConversations(codebaseId?: string): Promise<ConversationResponse[]> {
+export async function listConversations(
+  codebaseId?: string,
+  taskId?: string
+): Promise<ConversationResponse[]> {
   const params = new URLSearchParams();
   if (codebaseId) params.set('codebaseId', codebaseId);
+  if (taskId) params.set('taskId', taskId);
   const qs = params.toString();
   return fetchJSON<ConversationResponse[]>(`/api/conversations${qs ? `?${qs}` : ''}`);
 }
 
 export async function createConversation(
   codebaseId?: string,
-  message?: string
+  message?: string,
+  taskId?: string
 ): Promise<{ conversationId: string; id: string; dispatched?: boolean }> {
   const body: Record<string, string> = {};
   if (codebaseId) body.codebaseId = codebaseId;
   if (message) body.message = message;
+  if (taskId) body.taskId = taskId;
 
   return fetchJSON('/api/conversations', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+  });
+}
+
+export async function listTasks(options?: {
+  codebaseId?: string;
+  status?: 'active' | 'archived';
+  limit?: number;
+}): Promise<TaskResponse[]> {
+  const params = new URLSearchParams();
+  if (options?.codebaseId) params.set('codebaseId', options.codebaseId);
+  if (options?.status) params.set('status', options.status);
+  if (options?.limit) params.set('limit', String(options.limit));
+  const qs = params.toString();
+  return fetchJSON<TaskResponse[]>(`/api/tasks${qs ? `?${qs}` : ''}`);
+}
+
+export async function createTask(body: {
+  title: string;
+  description?: string;
+  codebaseId?: string;
+  branchName?: string;
+  prUrl?: string;
+  prNumber?: number;
+}): Promise<TaskResponse> {
+  return fetchJSON<TaskResponse>('/api/tasks', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function getTask(id: string): Promise<TaskDetailResponse> {
+  return fetchJSON<TaskDetailResponse>(`/api/tasks/${encodeURIComponent(id)}`);
+}
+
+export async function updateTask(
+  id: string,
+  body: Partial<{
+    title: string;
+    description: string | null;
+    branchName: string | null;
+    prUrl: string | null;
+    prNumber: number | null;
+    status: 'active' | 'archived';
+  }>
+): Promise<TaskResponse> {
+  return fetchJSON<TaskResponse>(`/api/tasks/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function deleteTask(id: string): Promise<{ success: boolean }> {
+  return fetchJSON<{ success: boolean }>(`/api/tasks/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
   });
 }
 
@@ -322,6 +407,7 @@ export interface DashboardCounts {
   cancelled: number;
   pending: number;
   paused: number;
+  blocked: number;
 }
 
 /** Paginated dashboard runs response. */
@@ -411,12 +497,14 @@ export async function listWorkflowRuns(options?: {
   status?: WorkflowRunStatus;
   limit?: number;
   codebaseId?: string;
+  taskId?: string;
 }): Promise<WorkflowRunResponse[]> {
   const params = new URLSearchParams();
   if (options?.conversationId) params.set('conversationId', options.conversationId);
   if (options?.status) params.set('status', options.status);
   if (options?.limit) params.set('limit', String(options.limit));
   if (options?.codebaseId) params.set('codebaseId', options.codebaseId);
+  if (options?.taskId) params.set('taskId', options.taskId);
   const qs = params.toString();
   const result = await fetchJSON<{ runs: WorkflowRunResponse[] }>(
     `/api/workflows/runs${qs ? `?${qs}` : ''}`

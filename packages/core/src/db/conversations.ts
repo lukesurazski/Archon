@@ -58,7 +58,8 @@ export async function getOrCreateConversation(
   platformType: string,
   platformId: string,
   codebaseId?: string,
-  parentConversationId?: string
+  parentConversationId?: string,
+  taskId?: string
 ): Promise<Conversation> {
   const existing = await pool.query<Conversation>(
     'SELECT * FROM remote_agent_conversations WHERE platform_type = $1 AND platform_conversation_id = $2',
@@ -105,8 +106,8 @@ export async function getOrCreateConversation(
   }
 
   const created = await pool.query<Conversation>(
-    'INSERT INTO remote_agent_conversations (platform_type, platform_conversation_id, ai_assistant_type, codebase_id, cwd) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-    [platformType, platformId, assistantType, finalCodebaseId, inheritedCwd]
+    'INSERT INTO remote_agent_conversations (platform_type, platform_conversation_id, ai_assistant_type, codebase_id, cwd, task_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+    [platformType, platformId, assistantType, finalCodebaseId, inheritedCwd, taskId ?? null]
   );
 
   return created.rows[0];
@@ -114,7 +115,7 @@ export async function getOrCreateConversation(
 
 export async function updateConversation(
   id: string,
-  updates: Partial<Pick<Conversation, 'codebase_id' | 'cwd' | 'isolation_env_id'>> & {
+  updates: Partial<Pick<Conversation, 'codebase_id' | 'cwd' | 'isolation_env_id' | 'task_id'>> & {
     hidden?: boolean;
   }
 ): Promise<void> {
@@ -133,6 +134,10 @@ export async function updateConversation(
   if (updates.isolation_env_id !== undefined) {
     fields.push(`isolation_env_id = $${String(i++)}`);
     values.push(updates.isolation_env_id);
+  }
+  if (updates.task_id !== undefined) {
+    fields.push(`task_id = $${String(i++)}`);
+    values.push(updates.task_id);
   }
   if (updates.hidden !== undefined) {
     fields.push(`hidden = $${String(i++)}`);
@@ -190,7 +195,8 @@ export async function listConversations(
   limit = 50,
   platformType?: string,
   codebaseId?: string,
-  excludeEmpty = false
+  excludeEmpty = false,
+  taskId?: string
 ): Promise<readonly Conversation[]> {
   const params: unknown[] = [];
   let sql =
@@ -209,6 +215,11 @@ export async function listConversations(
   if (codebaseId) {
     params.push(codebaseId);
     sql += ` AND codebase_id = $${String(params.length)}`;
+  }
+
+  if (taskId) {
+    params.push(taskId);
+    sql += ` AND task_id = $${String(params.length)}`;
   }
 
   sql += ' ORDER BY last_activity_at DESC NULLS LAST';

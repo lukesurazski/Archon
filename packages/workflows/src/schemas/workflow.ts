@@ -50,6 +50,38 @@ export const workflowWorktreePolicySchema = z.object({
 export type WorkflowWorktreePolicy = z.infer<typeof workflowWorktreePolicySchema>;
 
 // ---------------------------------------------------------------------------
+// Workflow-level input metadata
+// ---------------------------------------------------------------------------
+
+/**
+ * Optional UI metadata for the single `$ARGUMENTS` string passed into a workflow.
+ * This does not change runtime execution. It gives clients enough information to
+ * label the argument field clearly for workflows that expect a PR, branch, path,
+ * issue, or other well-known target.
+ */
+export const workflowInputTypeSchema = z.enum([
+  'text',
+  'pull_request',
+  'branch',
+  'path',
+  'issue',
+  'number',
+]);
+
+export type WorkflowInputType = z.infer<typeof workflowInputTypeSchema>;
+
+export const workflowInputSchema = z.object({
+  name: z.string().trim().min(1),
+  type: workflowInputTypeSchema,
+  label: z.string().trim().min(1).optional(),
+  description: z.string().trim().min(1).optional(),
+  placeholder: z.string().trim().min(1).optional(),
+  required: z.boolean().optional(),
+});
+
+export type WorkflowInput = z.infer<typeof workflowInputSchema>;
+
+// ---------------------------------------------------------------------------
 // WorkflowBase — common fields shared by all workflow types
 // ---------------------------------------------------------------------------
 
@@ -68,6 +100,7 @@ export const workflowBaseSchema = z.object({
   betas: z.array(z.string().min(1)).nonempty("'betas' must be a non-empty array").optional(),
   sandbox: sandboxSettingsSchema.optional(),
   worktree: workflowWorktreePolicySchema.optional(),
+  inputs: z.array(workflowInputSchema).optional(),
   /**
    * When `false`, the engine skips the path-exclusive lock for this workflow,
    * allowing N concurrent runs on the same live checkout. The author asserts

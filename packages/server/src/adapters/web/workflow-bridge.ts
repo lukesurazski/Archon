@@ -89,6 +89,7 @@ export function mapWorkflowEvent(event: WorkflowEmitterEvent): string | null {
     case 'node_started':
     case 'node_completed':
     case 'node_failed':
+    case 'node_blocked':
     case 'node_skipped':
       return JSON.stringify({
         type: 'dag_node',
@@ -102,10 +103,17 @@ export function mapWorkflowEvent(event: WorkflowEmitterEvent): string | null {
               ? 'completed'
               : event.type === 'node_failed'
                 ? 'failed'
-                : 'skipped',
+                : event.type === 'node_blocked'
+                  ? 'blocked'
+                  : 'skipped',
         duration: event.type === 'node_completed' ? event.duration : undefined,
         error: event.type === 'node_failed' ? event.error : undefined,
-        reason: event.type === 'node_skipped' ? event.reason : undefined,
+        reason:
+          event.type === 'node_skipped'
+            ? event.reason
+            : event.type === 'node_blocked'
+              ? event.reason
+              : undefined,
         providerId: event.type === 'node_started' ? event.providerId : undefined,
         authMode: event.type === 'node_started' ? event.authMode : undefined,
         credentialHint: event.type === 'node_started' ? event.credentialHint : undefined,
@@ -232,7 +240,8 @@ export class WorkflowEventBridge {
           (event.type === 'loop_iteration_completed' ||
             event.type === 'loop_iteration_failed' ||
             event.type === 'node_completed' ||
-            event.type === 'node_failed')
+            event.type === 'node_failed' ||
+            event.type === 'node_blocked')
         ) {
           this.onStepTransition(workerConversationId);
         }

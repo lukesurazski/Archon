@@ -101,6 +101,23 @@ describe('bundled-defaults', () => {
       expect(content).toContain('workflow_name');
     });
 
+    it('archon-respond-to-pr-feedback declares a pull request input', () => {
+      const content = BUNDLED_WORKFLOWS['archon-respond-to-pr-feedback'];
+      expect(content).toContain('inputs:');
+      expect(content).toContain('name: pr');
+      expect(content).toContain('type: pull_request');
+      expect(content).toContain('required: true');
+    });
+
+    it('archon-respond-to-pr-feedback fails blocked implementations instead of reporting completed', () => {
+      const content = BUNDLED_WORKFLOWS['archon-respond-to-pr-feedback'];
+      expect(content).toContain('id: record-head-before-implement');
+      expect(content).toContain('id: verify-implementation');
+      expect(content).toContain('implementation step reported BLOCKED');
+      expect(content).toContain('implementation step produced no new commit');
+      expect(content).toContain('depends_on: [verify-implementation]');
+    });
+
     it('archon-adversarial-dev init-workspace should avoid non-portable sed -i', () => {
       const content = BUNDLED_WORKFLOWS['archon-adversarial-dev'];
       expect(content).toContain('STATE_TMP="$ARTIFACTS/state.json.tmp"');

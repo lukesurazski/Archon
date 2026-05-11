@@ -10,6 +10,7 @@ import { z } from '@hono/zod-openapi';
 export const workflowRunStatusSchema = z.enum([
   'pending',
   'running',
+  'blocked',
   'completed',
   'failed',
   'cancelled',
@@ -38,6 +39,7 @@ export const RESUMABLE_WORKFLOW_STATUSES: readonly WorkflowRunStatus[] = [
 export const workflowStepStatusSchema = z.enum([
   'pending',
   'running',
+  'blocked',
   'completed',
   'failed',
   'skipped',
@@ -49,7 +51,14 @@ export type WorkflowStepStatus = z.infer<typeof workflowStepStatusSchema>;
 // NodeState
 // ---------------------------------------------------------------------------
 
-export const nodeStateSchema = z.enum(['pending', 'running', 'completed', 'failed', 'skipped']);
+export const nodeStateSchema = z.enum([
+  'pending',
+  'running',
+  'blocked',
+  'completed',
+  'failed',
+  'skipped',
+]);
 
 export type NodeState = z.infer<typeof nodeStateSchema>;
 
@@ -62,6 +71,11 @@ export type NodeState = z.infer<typeof nodeStateSchema>;
  * `output` is the concatenated assistant text (or JSON-encoded string from the SDK
  * when output_format is set). Empty string for failed/skipped nodes.
  * `error` is required when state is 'failed', absent on all other states.
+ * `nonRetryable` (failed only) signals the retry policy that the failure must
+ * not be retried even when `retry.onError: 'all'` is configured (e.g. the
+ * provider tool targeted a disallowed path, or a tool call timed out without
+ * producing a result). Structured at construction time so retry classification
+ * does not depend on string-matching the human-readable error message.
  */
 export const nodeOutputSchema = z.discriminatedUnion('state', [
   z.object({
@@ -70,10 +84,18 @@ export const nodeOutputSchema = z.discriminatedUnion('state', [
     sessionId: z.string().optional(),
   }),
   z.object({
+    state: z.literal('blocked'),
+    output: z.string(),
+    sessionId: z.string().optional(),
+    reason: z.string(),
+    question: z.string().optional(),
+  }),
+  z.object({
     state: z.literal('failed'),
     output: z.string(),
     sessionId: z.string().optional(),
     error: z.string(),
+    nonRetryable: z.boolean().optional(),
   }),
   z.object({
     state: z.enum(['pending', 'skipped']),

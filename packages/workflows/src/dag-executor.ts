@@ -5,8 +5,17 @@
  * Independent nodes within the same layer run concurrently via Promise.allSettled.
  * Captures all assistant output regardless of streaming mode for $node_id.output substitution.
  */
-import { readFile } from 'fs/promises';
-import { isAbsolute, resolve as resolvePath } from 'path';
+import { mkdir, readFile } from 'fs/promises';
+import { realpathSync } from 'fs';
+import {
+  basename as basenamePath,
+  dirname as dirnamePath,
+  isAbsolute,
+  join as joinPath,
+  relative as relativePath,
+  resolve as resolvePath,
+} from 'path';
+import { homedir } from 'os';
 import { execFileAsync } from '@archon/git';
 import { discoverScriptsForCwd } from './script-discovery';
 import type {
@@ -20,6 +29,7 @@ import type {
   NodeConfig,
   ProviderCapabilities,
   TokenUsage,
+  MessageChunk,
 } from '@archon/providers/types';
 import {
   getProviderCapabilities,
@@ -64,7 +74,7 @@ import {
   logWorkflowComplete,
   logWorkflowError,
 } from './logger';
-import { withIdleTimeout, STEP_IDLE_TIMEOUT_MS } from './utils/idle-timeout';
+import { STEP_IDLE_TIMEOUT_MS } from './utils/idle-timeout';
 import {
   classifyError,
   detectCreditExhaustion,
@@ -85,6 +95,479 @@ function getLog(): ReturnType<typeof createLogger> {
 }
 
 const MCP_FAILURE_PREFIX = 'MCP server connection failed: ';
+const DEFAULT_TOOL_CALL_TIMEOUT_MS = 2 * 60 * 1000;
+
+function getWorkflowToolCallTimeoutMs(): number {
+  const raw = process.env.ARCHON_WORKFLOW_TOOL_CALL_TIMEOUT_MS;
+  if (!raw) return DEFAULT_TOOL_CALL_TIMEOUT_MS;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TOOL_CALL_TIMEOUT_MS;
+}
+
+interface ActiveProviderTool {
+  toolName: string;
+  startedAt: number;
+}
+
+const PROVIDER_TIMEOUT_SENTINEL = Symbol('PROVIDER_TIMEOUT');
+
+async function* withProviderTimeouts(
+  generator: AsyncGenerator<MessageChunk>,
+  idleTimeoutMs: number,
+  toolTimeoutMs: number,
+  onIdleTimeout: () => void,
+  onToolTimeout: (tool: ActiveProviderTool, elapsedMs: number) => void
+): AsyncGenerator<MessageChunk> {
+  let activeTool: ActiveProviderTool | null = null;
+  let idleStartedAt = Date.now();
+  let timedOut = false;
+
+  try {
+    while (true) {
+      const now = Date.now();
+      const timeoutMs = activeTool
+        ? Math.max(0, toolTimeoutMs - (now - activeTool.startedAt))
+        : Math.max(0, idleTimeoutMs - (now - idleStartedAt));
+
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<typeof PROVIDER_TIMEOUT_SENTINEL>(resolve => {
+        timer = setTimeout(() => {
+          resolve(PROVIDER_TIMEOUT_SENTINEL);
+        }, timeoutMs);
+      });
+      const nextPromise = generator.next();
+
+      const result = await Promise.race([nextPromise, timeoutPromise]);
+      clearTimeout(timer);
+
+      if (result === PROVIDER_TIMEOUT_SENTINEL) {
+        timedOut = true;
+        nextPromise.catch(() => {
+          // Abort cleanup owns subprocess shutdown; suppress the pending read rejection.
+        });
+        if (activeTool) {
+          onToolTimeout(activeTool, Date.now() - activeTool.startedAt);
+        } else {
+          onIdleTimeout();
+        }
+        return;
+      }
+
+      if (result.done) return;
+
+      const msg = result.value;
+      if (msg.type === 'tool') {
+        activeTool = { toolName: msg.toolName, startedAt: Date.now() };
+      } else if (activeTool && msg.type !== 'rate_limit' && msg.type !== 'thinking') {
+        // Any non-progress message after a tool means the provider is responsive
+        // again. tool_result/result are explicit completion; assistant/system
+        // chunks imply the provider moved past the tool call.
+        activeTool = null;
+        idleStartedAt = Date.now();
+      } else if (!activeTool) {
+        idleStartedAt = Date.now();
+      }
+
+      yield msg;
+    }
+  } finally {
+    if (!timedOut) {
+      try {
+        await generator.return(undefined as never);
+      } catch (e) {
+        getLog().warn({ err: e as Error }, 'provider_timeout.generator_cleanup_failed');
+      }
+    }
+  }
+}
+
+function canonicalizePath(path: string): string {
+  const resolved = resolvePath(path);
+  try {
+    return realpathSync(resolved);
+  } catch {
+    // Final component may not exist yet (about-to-be-written file). Walk up
+    // until we find an existing ancestor and append the unresolved suffix
+    // back on. Otherwise a symlinked ancestor (e.g. `safe-link -> /etc`) one
+    // level above a still-missing target would silently fall back to the
+    // lexical path and let isPathInsideRoot() trust an out-of-allowlist
+    // location.
+    const suffix: string[] = [];
+    let current = resolved;
+    while (true) {
+      const parent = dirnamePath(current);
+      if (parent === current) break;
+      suffix.unshift(basenamePath(current));
+      try {
+        return resolvePath(realpathSync(parent), ...suffix);
+      } catch {
+        current = parent;
+      }
+    }
+    // Fail closed: no existing ancestor could be resolved. Throwing here
+    // prevents silent allowlist broadening through a symlinked ancestor.
+    throw new Error(`canonicalizePath: no existing ancestor for ${path}`);
+  }
+}
+
+function isPathInsideRoot(path: string, root: string): boolean {
+  const canonicalPath = canonicalizePath(path);
+  const canonicalRoot = canonicalizePath(root);
+  const rel = relativePath(canonicalRoot, canonicalPath);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+function stripHeredocBodies(command: string): string {
+  // Strip heredoc bodies so absolute paths embedded in the body (e.g. a
+  // literal "/pr-review/scope.md" inside a doc being authored) are not
+  // misread as filesystem targets. Keep the heredoc *start* line — that
+  // line can carry a redirection target like `cat <<EOF > /blocked` which
+  // is a real filesystem write and must still be checked.
+  return command.replace(/(<<-?\s*['"]?(\w+)['"]?[^\n]*)\n[\s\S]*?\n\s*\2(\s*)(?=\n|$)/g, '$1$3');
+}
+
+// Commands that read file contents. Their absolute/relative path arguments
+// are checked against the workflow allowlist so a prompt-injected agent
+// cannot exfiltrate arbitrary host files through Bash even though the
+// direct Read tool is guarded. We deliberately exclude navigation/info
+// commands like `cd`, `pwd`, `find`, `git status` so legitimate workflows
+// that mention absolute paths in non-file-reading positions (e.g.
+// `cd /tmp; rm <target>`) still get the intended target — not the
+// `cd` argument — flagged.
+const READ_COMMAND_PATTERN =
+  /(?:^|[;&|({]\s*)(?:cat|head|tail|less|more|bat|nl|cut|paste|column|pr|grep|egrep|fgrep|rg|awk|ls|wc|file|stat|md5sum|sha1sum|sha256sum|sha512sum|xxd|od|hexdump|strings|tac|rev|sed)\b([^\n;&|]*)/g;
+
+function extractReadShellPaths(command: string): string[] {
+  const paths = new Set<string>();
+  let match: RegExpExecArray | null;
+  // Reset lastIndex defensively — the regex is module-scoped so prior calls
+  // could leave state behind.
+  READ_COMMAND_PATTERN.lastIndex = 0;
+  while ((match = READ_COMMAND_PATTERN.exec(command)) !== null) {
+    const segment = match[1] ?? '';
+    for (const path of extractShellPaths(segment)) {
+      paths.add(path);
+    }
+    // Capture relative (`./`, `../`), home-relative (`~/`), and shell-variable
+    // (`$HOME/...`, `${TMPDIR}/...`) targets that the absolute-only scan
+    // misses. Without this, `cat ../secret`, `grep foo ~/notes.txt`, or
+    // `cat $HOME/.ssh/id_rsa` would bypass the read allowlist.
+    for (const rawToken of tokenizeShellSegment(segment)) {
+      if (!rawToken || rawToken.startsWith('-')) continue;
+      const expanded = expandShellVarPrefix(rawToken) ?? rawToken;
+      const token = normalizeHomeRelative(expanded);
+      if (shouldIgnoreShellPath(token)) continue;
+      if (looksLikeShellPath(token) && !token.startsWith('/')) {
+        paths.add(token);
+      } else if (token !== rawToken && isAbsolute(token)) {
+        // `~/foo`, `$HOME/foo`, or `${TMPDIR}/foo` expanded to an absolute
+        // path — record so the allowlist check catches it instead of
+        // resolving the literal token relative to cwd (which would let the
+        // lexical fallback in canonicalizePath trust `<cwd>/$HOME/foo`).
+        paths.add(token);
+      }
+    }
+  }
+  return [...paths];
+}
+
+function collectToolPaths(
+  toolName: string,
+  toolInput: Record<string, unknown> | undefined
+): string[] {
+  if (!toolInput) return [];
+  const normalizedToolName = toolName.toLowerCase();
+  if (normalizedToolName === 'bash') {
+    const command = toolInput.command;
+    if (typeof command !== 'string') return [];
+    // Strip heredoc bodies before scanning so doc content doesn't masquerade
+    // as filesystem paths.
+    const stripped = stripHeredocBodies(command);
+    const paths = new Set<string>();
+    // Read-side: paths passed to known read commands (cat, head, ls, ...)
+    // get checked against the workflow allowlist.
+    for (const path of extractReadShellPaths(stripped)) {
+      paths.add(path);
+    }
+    // Write-side: redirections plus mutating commands (also catches relative
+    // targets like `rm ../foo` that the absolute-only scan misses).
+    if (mayMutateShellPaths(stripped)) {
+      for (const path of extractMutatingShellPaths(stripped)) {
+        paths.add(path);
+      }
+    }
+    return [...paths];
+  }
+  const pathKeysByTool: Record<string, string[]> = {
+    read: ['file_path'],
+    write: ['file_path'],
+    edit: ['file_path'],
+    multiedit: ['file_path'],
+    notebookedit: ['notebook_path'],
+    grep: ['path'],
+    glob: ['path'],
+    ls: ['path'],
+  };
+  const keys = pathKeysByTool[normalizedToolName];
+  if (!keys) return [];
+
+  const paths: string[] = [];
+  for (const key of keys) {
+    const value = toolInput[key];
+    if (typeof value === 'string' && value.trim() !== '') {
+      paths.push(value);
+    } else if (Array.isArray(value)) {
+      paths.push(...value.filter((item): item is string => typeof item === 'string'));
+    }
+  }
+  return paths;
+}
+
+function normalizeHomeRelative(path: string): string {
+  // Bash expands a leading `~/` to the user's home directory before the kernel
+  // ever sees the path. Resolve it here so allowlist checks compare against the
+  // real target rather than `<cwd>/~/foo`.
+  if (path.startsWith('~/')) {
+    return joinPath(homedir(), path.slice(2));
+  }
+  return path;
+}
+
+// Shell variables we expand before allowlist comparison. Bash expands `$HOME`,
+// `$TMPDIR`, etc. before the kernel sees the path, so leaving them literal in
+// the token would let the lexical-fallback check trust `<cwd>/$HOME/foo` even
+// though the actual write lands under the user's home directory.
+const EXPANDABLE_SHELL_VARS = new Set(['HOME', 'TMPDIR', 'TMP', 'TEMP']);
+
+// Sentinel absolute prefix used when a token starts with an unresolved or
+// non-allowlisted shell variable. It is guaranteed to be outside any workflow
+// allowlist so isPathInsideRoot() fails closed instead of trusting the literal
+// `$VAR` token resolved under cwd.
+const UNRESOLVED_SHELL_VAR_ROOT = '/__archon_unresolved_shell_var__';
+
+function startsWithExpandableShellVarName(name: string): boolean {
+  return [...EXPANDABLE_SHELL_VARS].some(
+    expandableName => name !== expandableName && name.startsWith(expandableName)
+  );
+}
+
+function expandShellVarPrefix(token: string): string | null {
+  // Returns the expanded path if `token` starts with a `$VAR`/`${VAR}` prefix
+  // followed by `/` or end-of-string. Allowlisted vars are expanded via
+  // process.env; everything else collapses to a sentinel absolute path that
+  // cannot pass the allowlist check. Returns null for tokens without a
+  // shell-variable prefix so callers fall back to existing handling.
+  const match = /^\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))(.*)$/.exec(token);
+  if (!match) return null;
+  const name = match[1] ?? match[2] ?? '';
+  const rest = match[3] ?? '';
+  // Only `$VAR` (no trailing chars) or `$VAR/...` represents a path with the
+  // variable as its first segment. `$VARfoo` is a different identifier and
+  // should not be expanded as a path prefix.
+  if (rest !== '' && !rest.startsWith('/')) return null;
+  if (!EXPANDABLE_SHELL_VARS.has(name) && startsWithExpandableShellVarName(name)) {
+    return null;
+  }
+  if (EXPANDABLE_SHELL_VARS.has(name)) {
+    const value = process.env[name];
+    if (typeof value === 'string' && value !== '' && isAbsolute(value)) {
+      return rest === '' ? value : joinPath(value, rest.slice(1));
+    }
+  }
+  return joinPath(UNRESOLVED_SHELL_VAR_ROOT, name, rest);
+}
+
+function shouldIgnoreShellPath(path: string): boolean {
+  return (
+    path === '/dev/null' ||
+    path === '/dev/stdin' ||
+    path === '/dev/stdout' ||
+    path === '/dev/stderr' ||
+    path.startsWith('/bin/') ||
+    path.startsWith('/usr/bin/') ||
+    path.startsWith('/usr/local/bin/')
+  );
+}
+
+function looksLikeShellPath(token: string): boolean {
+  if (!token) return false;
+  // Absolute, explicit-relative (./ or ../), home-relative (~/), or contains a slash.
+  return (
+    token.startsWith('/') ||
+    token.startsWith('./') ||
+    token.startsWith('../') ||
+    token.startsWith('~/') ||
+    token.includes('/')
+  );
+}
+
+function tokenizeShellSegment(segment: string): string[] {
+  const tokens: string[] = [];
+  const tokenPattern = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = tokenPattern.exec(segment)) !== null) {
+    tokens.push(match[1] ?? match[2] ?? match[3] ?? '');
+  }
+  return tokens;
+}
+
+function extractShellPaths(command: string): string[] {
+  const paths: string[] = [];
+  // Absolute paths matched in the wider command. The redirection/mutating-segment
+  // walks below pull additional relative-path targets that this regex misses.
+  const absolutePathPattern = /(?:^|[\s"'=])((?:\/[A-Za-z0-9._~+-]+)+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = absolutePathPattern.exec(command)) !== null) {
+    const path = match[1];
+    if (!shouldIgnoreShellPath(path)) {
+      paths.push(path);
+    }
+  }
+  return paths;
+}
+
+function extractMutatingShellPaths(command: string): string[] {
+  const paths = new Set<string>();
+
+  // Redirection targets are the write targets. Match absolute, relative, and
+  // home-relative paths. Allow redirections immediately after tokens (e.g.
+  // `echo hi>../outside.txt`) — `(?<!<)` excludes the `<<` heredoc operator.
+  // Do not scan heredoc bodies or piped command output.
+  const redirectionPattern =
+    /(?<!<)(?:\d?>{1,2}|&>)\s*(["']?)((?:\/|\.{1,2}\/|~\/)[^\s"'|;&)<>]+)\1/g;
+  let redirectMatch: RegExpExecArray | null;
+  while ((redirectMatch = redirectionPattern.exec(command)) !== null) {
+    const path = normalizeHomeRelative(redirectMatch[2]);
+    if (!shouldIgnoreShellPath(path)) paths.add(path);
+  }
+
+  const mutatingSegmentPattern =
+    /(?:^|[;&|({]\s*)(?:rm|rmdir|mv|cp|mkdir|touch|tee|chmod|chown|install|truncate)\b([^\n;&|]*)|(?:^|[;&|({]\s*)sed\s+-i\b([^\n;&|]*)|(?:^|[;&|({]\s*)git\s+(?:checkout|reset|clean|merge|rebase|pull|worktree\s+(?:add|remove|prune))\b([^\n;&|]*)/g;
+  let segmentMatch: RegExpExecArray | null;
+  while ((segmentMatch = mutatingSegmentPattern.exec(command)) !== null) {
+    const segment = segmentMatch[1] ?? segmentMatch[2] ?? segmentMatch[3] ?? '';
+    for (const path of extractShellPaths(segment)) {
+      paths.add(path);
+    }
+    // Capture relative-path and shell-variable targets that the absolute-only
+    // regex misses (e.g. `rm -rf ../other-repo`, `cp foo ../../target`,
+    // `tee $HOME/.ssh/authorized_keys`).
+    for (const rawToken of tokenizeShellSegment(segment)) {
+      if (!rawToken || rawToken.startsWith('-')) continue;
+      const expanded = expandShellVarPrefix(rawToken) ?? rawToken;
+      const token = normalizeHomeRelative(expanded);
+      if (shouldIgnoreShellPath(token)) continue;
+      if (looksLikeShellPath(token) && !token.startsWith('/')) {
+        paths.add(token);
+      } else if (token !== rawToken && isAbsolute(token)) {
+        // `~/foo`, `$HOME/foo`, or `${TMPDIR}/foo` expanded to an absolute
+        // path — record so the allowlist check below catches it instead of
+        // resolving the literal token relative to cwd.
+        paths.add(token);
+      }
+    }
+  }
+
+  return [...paths];
+}
+
+function mayMutateShellPaths(command: string): boolean {
+  // Detect any mutating command/segment. Relative-path target detection happens
+  // in extractMutatingShellPaths; here we only need to flag that the command
+  // contains *any* mutating operation worth scanning.
+  const mutatingCommandPattern =
+    /(?:^|[;&|({]\s*)(?:rm|rmdir|mv|cp|mkdir|touch|tee|chmod|chown|install|truncate)\b|(?:^|[;&|({]\s*)sed\s+-i\b|(?:^|[;&|({]\s*)git\s+(?:checkout|reset|clean|merge|rebase|pull|worktree\s+(?:add|remove|prune))\b|(?:^|[^<])>{1,2}\s*(?:\/|\.{1,2}\/|~\/|\w)|\bcat\s+<<|<<-/;
+  return mutatingCommandPattern.test(command);
+}
+
+function getClaudeProjectDir(cwd: string): string {
+  // Claude SDK encodes the cwd by replacing path separators with hyphens.
+  const encoded = resolvePath(cwd).replace(/\//g, '-');
+  return resolvePath(homedir(), '.claude', 'projects', encoded);
+}
+
+export function getDisallowedToolPath(
+  toolName: string,
+  toolInput: Record<string, unknown> | undefined,
+  cwd: string,
+  allowedRoots: readonly string[] = []
+): string | null {
+  // All file-touching tools (read/grep/glob/ls/write/edit/bash/...) are
+  // canonicalized and checked against the allowlist. Read-only tools get the
+  // same allowlist as mutating tools so a prompt-injected agent cannot Read
+  // arbitrary host files. The Claude SDK's per-cwd project cache is allowed
+  // so legitimate SDK scratch reads keep working; the temp tree is no longer
+  // wholesale-allowed for bash — callers that need /tmp access must pass it
+  // via `allowedRoots`.
+  const roots = [cwd, ...allowedRoots, getClaudeProjectDir(cwd)]
+    .filter(root => root.trim() !== '')
+    .map(root => resolvePath(root));
+  for (const rawPath of collectToolPaths(toolName, toolInput)) {
+    const resolved = isAbsolute(rawPath) ? resolvePath(rawPath) : resolvePath(cwd, rawPath);
+    if (!roots.some(root => isPathInsideRoot(resolved, root))) {
+      return resolved;
+    }
+  }
+  return null;
+}
+
+function getWorkflowAllowedToolRoots(cwd: string, artifactsDir: string, logDir: string): string[] {
+  const roots = [cwd, artifactsDir, logDir];
+  // Agents often create/check the run directory from its parent
+  // (`.../artifacts/runs/<run-id>`), so the artifact/log roots must include
+  // that parent. This still does not grant access to the source checkout.
+  roots.push(dirnamePath(artifactsDir), dirnamePath(logDir));
+  return [...new Set(roots.map(root => resolvePath(root)))];
+}
+
+function getWorkflowScratchDir(artifactsDir: string): string {
+  return resolvePath(artifactsDir, 'tmp');
+}
+
+function buildWorkflowRuntimeEnv(
+  artifactsDir: string,
+  logDir: string,
+  baseBranch: string,
+  envVars?: Record<string, string>
+): Record<string, string> {
+  const scratchDir = getWorkflowScratchDir(artifactsDir);
+  return {
+    ...(envVars ?? {}),
+    ARTIFACTS_DIR: artifactsDir,
+    LOG_DIR: logDir,
+    BASE_BRANCH: baseBranch,
+    WORKFLOW_TMPDIR: scratchDir,
+    TMPDIR: scratchDir,
+    TMP: scratchDir,
+    TEMP: scratchDir,
+  };
+}
+
+function isHumanInputTool(toolName: string): boolean {
+  const normalized = toolName.toLowerCase();
+  return normalized === 'askuserquestion' || normalized === 'request_user_input';
+}
+
+function extractHumanInputQuestion(toolInput: Record<string, unknown> | undefined): string {
+  if (!toolInput) return 'The workflow is waiting for human input.';
+  const directQuestion = toolInput.question;
+  if (typeof directQuestion === 'string' && directQuestion.trim() !== '') {
+    return directQuestion.trim();
+  }
+  const questions = toolInput.questions;
+  if (Array.isArray(questions)) {
+    for (const item of questions) {
+      if (typeof item === 'string' && item.trim() !== '') return item.trim();
+      if (item && typeof item === 'object') {
+        const question = (item as Record<string, unknown>).question;
+        if (typeof question === 'string' && question.trim() !== '') return question.trim();
+      }
+    }
+  }
+  const prompt = toolInput.prompt;
+  if (typeof prompt === 'string' && prompt.trim() !== '') return prompt.trim();
+  return 'The workflow is waiting for human input.';
+}
 
 /** A failed MCP server entry parsed from the SDK message. `segment` is the
  *  original substring (e.g. `"telegram (disconnected)"`) so callers can
@@ -228,6 +711,21 @@ function getEffectiveNodeRetryConfig(node: DagNode): {
  */
 function isTransientNodeError(errorMessage: string): boolean {
   return classifyError(new Error(errorMessage)) === 'TRANSIENT';
+}
+
+/**
+ * Thrown when a node must not be retried even when `retry.onError: 'all'` is
+ * configured: provider tool targeted a disallowed path, or a tool call timed
+ * out without producing a result. Catch sites translate this into a
+ * `nodeOutput.nonRetryable: true` flag so the retry policy classifies via
+ * structured data rather than substring-matching the error message.
+ */
+class WorkflowNonRetryableError extends Error {
+  readonly nonRetryable = true;
+  constructor(message: string) {
+    super(message);
+    this.name = 'WorkflowNonRetryableError';
+  }
 }
 
 interface NodeProviderDisplayMeta {
@@ -732,253 +1230,460 @@ async function executeNodeInternal(
   const shouldForkSession = resumeSessionId !== undefined;
   const nodeOptionsWithAbort: SendQueryOptions | undefined = {
     ...nodeOptions,
+    env: buildWorkflowRuntimeEnv(artifactsDir, logDir, baseBranch, nodeOptions?.env),
     abortSignal: nodeAbortController.signal,
     ...(shouldForkSession ? { forkSession: true } : {}),
   };
   let nodeIdleTimedOut = false;
+  let nodeToolTimedOut: { toolName: string; elapsedMs: number } | null = null;
+  let nodeSafetyViolation = false;
   const effectiveIdleTimeout = node.idle_timeout ?? STEP_IDLE_TIMEOUT_MS;
+  const effectiveToolTimeout = Math.min(effectiveIdleTimeout, getWorkflowToolCallTimeoutMs());
   let lastToolStartedAt: { toolName: string; startedAt: number } | null = null;
+  let watchdogActiveTool: ActiveProviderTool | null = null;
+  let lastProviderYieldAt = Date.now();
 
   try {
-    for await (const msg of withIdleTimeout(
-      aiClient.sendQuery(finalPrompt, cwd, resumeSessionId, nodeOptionsWithAbort),
-      effectiveIdleTimeout,
-      () => {
-        nodeIdleTimedOut = true;
+    const providerStream = aiClient.sendQuery(
+      finalPrompt,
+      cwd,
+      resumeSessionId,
+      nodeOptionsWithAbort
+    );
+    let watchdogTimer: ReturnType<typeof setInterval> | undefined;
+    const clearWatchdog = (): void => {
+      if (watchdogTimer) {
+        clearInterval(watchdogTimer);
+        watchdogTimer = undefined;
+      }
+    };
+    const watchdogPromise = new Promise<never>((_, reject) => {
+      // Tool-only watchdog: enforce per-tool-call timeouts when the
+      // provider stops yielding while a tool is active. Idle-timeout
+      // handling is owned by withProviderTimeouts() so it can drive the
+      // soft "completed via idle timeout" recovery path; duplicating that
+      // here previously turned soft idle timeouts into non-retryable
+      // failures.
+      const tickMs = Math.min(1000, effectiveToolTimeout);
+      watchdogTimer = setInterval(() => {
+        if (!watchdogActiveTool) return;
+        const now = Date.now();
+        const timedOutTool = watchdogActiveTool;
+        const elapsedMs = now - timedOutTool.startedAt;
+        if (elapsedMs < effectiveToolTimeout) return;
+        nodeToolTimedOut = { toolName: timedOutTool.toolName, elapsedMs };
         getLog().warn(
-          { nodeId: node.id, timeoutMs: effectiveIdleTimeout },
-          'dag_node_idle_timeout_reached'
+          {
+            nodeId: node.id,
+            toolName: timedOutTool.toolName,
+            timeoutMs: effectiveToolTimeout,
+            elapsedMs,
+          },
+          'dag_node_tool_watchdog_timeout_reached'
         );
         nodeAbortController.abort();
-      }
-    )) {
-      const tickNow = Date.now();
-      const nodeKey = `${workflowRun.id}:${node.id}`;
-
-      // Cancel/pause check — read-only, no write contention in WAL mode (every 10s).
-      //
-      // `paused` is tolerated here: an approval node can transition the run to
-      // paused while this concurrent node is mid-stream (same topological layer).
-      // The streaming node should be allowed to finish its own output — the
-      // paused gate owns workflow progression, not individual node lifecycles.
-      // Only truly terminal / unknown states (null, cancelled, failed, completed)
-      // abort the in-flight stream.
-      if (tickNow - (lastNodeCancelCheck.get(nodeKey) ?? 0) > CANCEL_CHECK_INTERVAL_MS) {
-        lastNodeCancelCheck.set(nodeKey, tickNow);
-        try {
-          const streamStatus = await deps.store.getWorkflowRunStatus(workflowRun.id);
-          if (!shouldContinueStreamingForStatus(streamStatus)) {
-            getLog().info(
-              { workflowRunId: workflowRun.id, nodeId: node.id, status: streamStatus ?? 'deleted' },
-              'dag.stop_detected_during_streaming'
-            );
-            nodeAbortController.abort();
-            break;
-          }
-        } catch (cancelCheckErr) {
+        clearWatchdog();
+        reject(
+          new WorkflowNonRetryableError(
+            `Tool '${timedOutTool.toolName}' in node '${node.id}' timed out after ${String(Math.round(elapsedMs / 1000))}s without producing a result.`
+          )
+        );
+      }, tickMs);
+    });
+    const streamPromise = (async (): Promise<NodeExecutionResult | undefined> => {
+      for await (const msg of withProviderTimeouts(
+        providerStream,
+        effectiveIdleTimeout,
+        effectiveToolTimeout,
+        () => {
+          nodeIdleTimedOut = true;
           getLog().warn(
-            { err: cancelCheckErr as Error, workflowRunId: workflowRun.id, nodeId: node.id },
-            'dag.status_check_failed'
+            { nodeId: node.id, timeoutMs: effectiveIdleTimeout },
+            'dag_node_idle_timeout_reached'
           );
-        }
-      }
-
-      // Activity heartbeat — write, throttled to every 60s (only for stale/zombie detection)
-      if (tickNow - (lastNodeActivityUpdate.get(nodeKey) ?? 0) > ACTIVITY_HEARTBEAT_INTERVAL_MS) {
-        lastNodeActivityUpdate.set(nodeKey, tickNow);
-        try {
-          await deps.store.updateWorkflowActivity(workflowRun.id);
-        } catch (e) {
+          nodeAbortController.abort();
+        },
+        (tool, elapsedMs) => {
+          nodeToolTimedOut = { toolName: tool.toolName, elapsedMs };
           getLog().warn(
-            { err: e as Error, workflowRunId: workflowRun.id },
-            'dag.activity_update_failed'
-          );
-        }
-      }
-
-      if (msg.type === 'assistant' && msg.content) {
-        nodeOutputText += msg.content; // ALWAYS capture for $node_id.output
-        if (streamingMode === 'stream' || msg.flush) {
-          // `flush` chunks (e.g. Pi notify() emitting a plannotator review URL)
-          // must reach the user before the node blocks. Drain any queued batch
-          // content first so order is preserved.
-          if (streamingMode === 'batch' && batchMessages.length > 0) {
-            await safeSendMessage(
-              platform,
-              conversationId,
-              batchMessages.join('\n\n'),
-              nodeContext
-            );
-            batchMessages.length = 0;
-          }
-          await safeSendMessage(platform, conversationId, msg.content, nodeContext);
-        } else {
-          batchMessages.push(msg.content);
-        }
-        await logAssistant(logDir, workflowRun.id, msg.content);
-      } else if (msg.type === 'tool' && msg.toolName) {
-        const now = Date.now();
-
-        // Emit tool_completed for the previous tool (fire-and-forget)
-        if (lastToolStartedAt) {
-          const prevTool = lastToolStartedAt;
-          getWorkflowEventEmitter().emit({
-            type: 'tool_completed',
-            runId: workflowRun.id,
-            toolName: prevTool.toolName,
-            stepName: node.id,
-            durationMs: now - prevTool.startedAt,
-          });
-          deps.store
-            .createWorkflowEvent({
-              workflow_run_id: workflowRun.id,
-              event_type: 'tool_completed',
-              step_name: node.id,
-              data: {
-                tool_name: prevTool.toolName,
-                duration_ms: now - prevTool.startedAt,
-              },
-            })
-            .catch((err: Error) => {
-              getLog().error(
-                { err, workflowRunId: workflowRun.id, eventType: 'tool_completed' },
-                'workflow_event_persist_failed'
-              );
-            });
-        }
-        lastToolStartedAt = { toolName: msg.toolName, startedAt: now };
-
-        // Emit tool_started for the current tool (fire-and-forget)
-        getWorkflowEventEmitter().emit({
-          type: 'tool_started',
-          runId: workflowRun.id,
-          toolName: msg.toolName,
-          stepName: node.id,
-        });
-
-        if (streamingMode === 'stream') {
-          const toolMsg = formatToolCall(msg.toolName, msg.toolInput);
-          await safeSendMessage(platform, conversationId, toolMsg, nodeContext, {
-            category: 'tool_call_formatted',
-          } as WorkflowMessageMetadata);
-
-          // Send structured event to adapters that support it (Web UI)
-          if (platform.sendStructuredEvent) {
-            await platform.sendStructuredEvent(conversationId, msg);
-          }
-        }
-        await logTool(logDir, workflowRun.id, msg.toolName, msg.toolInput ?? {});
-
-        // Persist tool_called event for ALL adapters (fire-and-forget)
-        deps.store
-          .createWorkflowEvent({
-            workflow_run_id: workflowRun.id,
-            event_type: 'tool_called',
-            step_name: node.id,
-            data: {
-              tool_name: msg.toolName,
-              tool_input: msg.toolInput ?? {},
-            },
-          })
-          .catch((err: Error) => {
-            getLog().error(
-              { err, workflowRunId: workflowRun.id, eventType: 'tool_called' },
-              'workflow_event_persist_failed'
-            );
-          });
-      } else if (msg.type === 'tool_result' && msg.toolName) {
-        if (streamingMode === 'stream' && platform.sendStructuredEvent) {
-          await platform.sendStructuredEvent(conversationId, msg);
-        }
-      } else if (msg.type === 'result') {
-        // Emit tool_completed for the last tool in the node
-        if (lastToolStartedAt) {
-          const prevTool = lastToolStartedAt;
-          getWorkflowEventEmitter().emit({
-            type: 'tool_completed',
-            runId: workflowRun.id,
-            toolName: prevTool.toolName,
-            stepName: node.id,
-            durationMs: Date.now() - prevTool.startedAt,
-          });
-          deps.store
-            .createWorkflowEvent({
-              workflow_run_id: workflowRun.id,
-              event_type: 'tool_completed',
-              step_name: node.id,
-              data: {
-                tool_name: prevTool.toolName,
-                duration_ms: Date.now() - prevTool.startedAt,
-              },
-            })
-            .catch((err: Error) => {
-              getLog().error(
-                { err, workflowRunId: workflowRun.id, eventType: 'tool_completed' },
-                'workflow_event_persist_failed'
-              );
-            });
-          lastToolStartedAt = null;
-        }
-        if (msg.sessionId) newSessionId = msg.sessionId;
-        if (msg.tokens) nodeTokens = msg.tokens;
-        if (msg.cost !== undefined) nodeCostUsd = msg.cost;
-        if (msg.stopReason !== undefined) nodeStopReason = msg.stopReason;
-        if (msg.numTurns !== undefined) nodeNumTurns = msg.numTurns;
-        if (msg.modelUsage) nodeModelUsage = msg.modelUsage;
-        if (msg.structuredOutput !== undefined) structuredOutput = msg.structuredOutput;
-        // Fail the node if the SDK reports a cost cap exceeded error
-        if (msg.isError && msg.errorSubtype === 'error_max_budget_usd') {
-          const cap = nodeOptions?.maxBudgetUsd;
-          getLog().warn(
-            { nodeId: node.id, maxBudgetUsd: cap, durationMs: Date.now() - nodeStartTime },
-            'dag.node_budget_cap_exceeded'
-          );
-          throw new Error(
-            `Node '${node.id}' exceeded cost cap${cap !== undefined ? ` of $${cap.toFixed(2)}` : ''}.`
-          );
-        }
-        // Fail loudly on any other SDK error result. Previously we broke out of
-        // the stream silently, producing empty/partial output without signaling
-        // failure — which let failed iterations masquerade as successes (#1208).
-        if (msg.isError) {
-          const subtype = msg.errorSubtype ?? 'unknown';
-          const errorsDetail = msg.errors?.length ? ` — ${msg.errors.join('; ')}` : '';
-          getLog().error(
             {
               nodeId: node.id,
-              errorSubtype: subtype,
-              errors: msg.errors,
-              sessionId: msg.sessionId,
-              stopReason: msg.stopReason,
-              durationMs: Date.now() - nodeStartTime,
+              toolName: tool.toolName,
+              timeoutMs: effectiveToolTimeout,
+              elapsedMs,
             },
-            'dag.node_sdk_error_result'
+            'dag_node_tool_timeout_reached'
           );
-          throw new Error(`Node '${node.id}' failed: SDK returned ${subtype}${errorsDetail}`);
+          nodeAbortController.abort();
         }
-        break; // Result is the "I'm done" signal — don't wait for subprocess to exit
-      } else if (msg.type === 'system' && msg.content) {
-        // Providers yield system chunks for user-actionable issues (missing env
-        // vars, Haiku+MCP, structured output failures, etc.). MCP-failure
-        // chunks need filtering: user-level plugin MCPs inherited from
-        // `~/.claude/` (e.g. `telegram`) routinely fail to connect inside the
-        // headless subprocess and aren't actionable for the workflow author.
-        // Other warnings (⚠️) are always actionable and surface verbatim.
-        if (msg.content.startsWith(MCP_FAILURE_PREFIX)) {
-          const failedEntries = parseMcpFailureServerNames(msg.content);
-          const workflowFailures = failedEntries.filter(e => configuredMcpNames.has(e.name));
-          const pluginFailures = failedEntries.filter(e => !configuredMcpNames.has(e.name));
+      )) {
+        lastProviderYieldAt = Date.now();
+        if (msg.type === 'tool' && msg.toolName) {
+          watchdogActiveTool = { toolName: msg.toolName, startedAt: lastProviderYieldAt };
+        } else if (watchdogActiveTool && msg.type !== 'rate_limit' && msg.type !== 'thinking') {
+          watchdogActiveTool = null;
+        }
+        const tickNow = Date.now();
+        const nodeKey = `${workflowRun.id}:${node.id}`;
 
-          if (workflowFailures.length > 0) {
-            const filteredMsg = `${MCP_FAILURE_PREFIX}${workflowFailures.map(e => e.segment).join(', ')}`;
+        // Cancel/pause check — read-only, no write contention in WAL mode (every 10s).
+        //
+        // `paused` is tolerated here: an approval node can transition the run to
+        // paused while this concurrent node is mid-stream (same topological layer).
+        // The streaming node should be allowed to finish its own output — the
+        // paused gate owns workflow progression, not individual node lifecycles.
+        // Only truly terminal / unknown states (null, cancelled, failed, completed)
+        // abort the in-flight stream.
+        if (tickNow - (lastNodeCancelCheck.get(nodeKey) ?? 0) > CANCEL_CHECK_INTERVAL_MS) {
+          lastNodeCancelCheck.set(nodeKey, tickNow);
+          try {
+            const streamStatus = await deps.store.getWorkflowRunStatus(workflowRun.id);
+            if (!shouldContinueStreamingForStatus(streamStatus)) {
+              getLog().info(
+                {
+                  workflowRunId: workflowRun.id,
+                  nodeId: node.id,
+                  status: streamStatus ?? 'deleted',
+                },
+                'dag.stop_detected_during_streaming'
+              );
+              nodeAbortController.abort();
+              break;
+            }
+          } catch (cancelCheckErr) {
             getLog().warn(
-              { nodeId: node.id, systemContent: filteredMsg },
+              { err: cancelCheckErr as Error, workflowRunId: workflowRun.id, nodeId: node.id },
+              'dag.status_check_failed'
+            );
+          }
+        }
+
+        // Activity heartbeat — write, throttled to every 60s (only for stale/zombie detection)
+        if (tickNow - (lastNodeActivityUpdate.get(nodeKey) ?? 0) > ACTIVITY_HEARTBEAT_INTERVAL_MS) {
+          lastNodeActivityUpdate.set(nodeKey, tickNow);
+          try {
+            await deps.store.updateWorkflowActivity(workflowRun.id);
+          } catch (e) {
+            getLog().warn(
+              { err: e as Error, workflowRunId: workflowRun.id },
+              'dag.activity_update_failed'
+            );
+          }
+        }
+
+        if (msg.type === 'assistant' && msg.content) {
+          nodeOutputText += msg.content; // ALWAYS capture for $node_id.output
+          if (streamingMode === 'stream' || msg.flush) {
+            // `flush` chunks (e.g. Pi notify() emitting a plannotator review URL)
+            // must reach the user before the node blocks. Drain any queued batch
+            // content first so order is preserved.
+            if (streamingMode === 'batch' && batchMessages.length > 0) {
+              await safeSendMessage(
+                platform,
+                conversationId,
+                batchMessages.join('\n\n'),
+                nodeContext
+              );
+              batchMessages.length = 0;
+            }
+            await safeSendMessage(platform, conversationId, msg.content, nodeContext);
+          } else {
+            batchMessages.push(msg.content);
+          }
+          await logAssistant(logDir, workflowRun.id, msg.content);
+        } else if (msg.type === 'tool' && msg.toolName) {
+          const now = Date.now();
+          const disallowedPath = getDisallowedToolPath(
+            msg.toolName,
+            msg.toolInput,
+            cwd,
+            getWorkflowAllowedToolRoots(cwd, artifactsDir, logDir)
+          );
+          if (disallowedPath) {
+            const errorMessage = `Tool '${msg.toolName}' in node '${node.id}' targeted path outside the workflow working path: ${disallowedPath}`;
+            nodeSafetyViolation = true;
+            nodeAbortController.abort();
+            throw new WorkflowNonRetryableError(errorMessage);
+          }
+
+          // Emit tool_completed for the previous tool (fire-and-forget)
+          if (lastToolStartedAt) {
+            const prevTool = lastToolStartedAt;
+            getWorkflowEventEmitter().emit({
+              type: 'tool_completed',
+              runId: workflowRun.id,
+              toolName: prevTool.toolName,
+              stepName: node.id,
+              durationMs: now - prevTool.startedAt,
+            });
+            deps.store
+              .createWorkflowEvent({
+                workflow_run_id: workflowRun.id,
+                event_type: 'tool_completed',
+                step_name: node.id,
+                data: {
+                  tool_name: prevTool.toolName,
+                  duration_ms: now - prevTool.startedAt,
+                },
+              })
+              .catch((err: Error) => {
+                getLog().error(
+                  { err, workflowRunId: workflowRun.id, eventType: 'tool_completed' },
+                  'workflow_event_persist_failed'
+                );
+              });
+          }
+          lastToolStartedAt = { toolName: msg.toolName, startedAt: now };
+
+          // Emit tool_started for the current tool (fire-and-forget)
+          getWorkflowEventEmitter().emit({
+            type: 'tool_started',
+            runId: workflowRun.id,
+            toolName: msg.toolName,
+            stepName: node.id,
+          });
+
+          if (streamingMode === 'stream') {
+            const toolMsg = formatToolCall(msg.toolName, msg.toolInput);
+            await safeSendMessage(platform, conversationId, toolMsg, nodeContext, {
+              category: 'tool_call_formatted',
+            } as WorkflowMessageMetadata);
+
+            // Send structured event to adapters that support it (Web UI)
+            if (platform.sendStructuredEvent) {
+              await platform.sendStructuredEvent(conversationId, msg);
+            }
+          }
+          await logTool(logDir, workflowRun.id, msg.toolName, msg.toolInput ?? {});
+
+          // Persist tool_called event for ALL adapters (fire-and-forget)
+          deps.store
+            .createWorkflowEvent({
+              workflow_run_id: workflowRun.id,
+              event_type: 'tool_called',
+              step_name: node.id,
+              data: {
+                tool_name: msg.toolName,
+                tool_input: msg.toolInput ?? {},
+              },
+            })
+            .catch((err: Error) => {
+              getLog().error(
+                { err, workflowRunId: workflowRun.id, eventType: 'tool_called' },
+                'workflow_event_persist_failed'
+              );
+            });
+
+          if (isHumanInputTool(msg.toolName)) {
+            // Emit a tool_completed for the human-input tool before transitioning
+            // to node_blocked; otherwise the Web UI keeps the tool in a running
+            // state forever and the workflow card shows a stale in-progress tool.
+            if (lastToolStartedAt) {
+              const prevTool = lastToolStartedAt;
+              const completedAt = Date.now();
+              getWorkflowEventEmitter().emit({
+                type: 'tool_completed',
+                runId: workflowRun.id,
+                toolName: prevTool.toolName,
+                stepName: node.id,
+                durationMs: completedAt - prevTool.startedAt,
+              });
+              deps.store
+                .createWorkflowEvent({
+                  workflow_run_id: workflowRun.id,
+                  event_type: 'tool_completed',
+                  step_name: node.id,
+                  data: {
+                    tool_name: prevTool.toolName,
+                    duration_ms: completedAt - prevTool.startedAt,
+                  },
+                })
+                .catch((err: Error) => {
+                  getLog().error(
+                    { err, workflowRunId: workflowRun.id, eventType: 'tool_completed' },
+                    'workflow_event_persist_failed'
+                  );
+                });
+              lastToolStartedAt = null;
+            }
+
+            const question = extractHumanInputQuestion(msg.toolInput);
+            const blockedOutput = nodeOutputText.trim() ? nodeOutputText : question;
+            const duration = Date.now() - nodeStartTime;
+            const reason = 'human_input_requested';
+
+            getLog().info(
+              { workflowRunId: workflowRun.id, nodeId: node.id, toolName: msg.toolName },
+              'dag_node_blocked_for_human_input'
+            );
+
+            await deps.store.updateWorkflowRun(workflowRun.id, {
+              status: 'blocked',
+              metadata: {
+                blocked: {
+                  type: reason,
+                  nodeId: node.id,
+                  message: question,
+                  toolName: msg.toolName,
+                },
+              },
+            });
+
+            await deps.store.createWorkflowEvent({
+              workflow_run_id: workflowRun.id,
+              event_type: 'node_blocked',
+              step_name: node.id,
+              data: {
+                reason,
+                question,
+                duration_ms: duration,
+                node_output: blockedOutput,
+              },
+            });
+
+            emitter.emit({
+              type: 'node_blocked',
+              runId: workflowRun.id,
+              nodeId: node.id,
+              nodeName: node.command ?? node.id,
+              reason,
+              question,
+            });
+
+            await safeSendMessage(platform, conversationId, `Workflow is waiting: ${question}`, {
+              workflowId: workflowRun.id,
+              nodeName: node.id,
+            });
+
+            lastNodeCancelCheck.delete(`${workflowRun.id}:${node.id}`);
+            lastNodeActivityUpdate.delete(`${workflowRun.id}:${node.id}`);
+
+            return {
+              state: 'blocked',
+              output: blockedOutput,
+              sessionId: newSessionId,
+              reason,
+              question,
+              costUsd: nodeCostUsd,
+            };
+          }
+        } else if (msg.type === 'tool_result' && msg.toolName) {
+          if (streamingMode === 'stream' && platform.sendStructuredEvent) {
+            await platform.sendStructuredEvent(conversationId, msg);
+          }
+        } else if (msg.type === 'result') {
+          // Emit tool_completed for the last tool in the node
+          if (lastToolStartedAt) {
+            const prevTool = lastToolStartedAt;
+            getWorkflowEventEmitter().emit({
+              type: 'tool_completed',
+              runId: workflowRun.id,
+              toolName: prevTool.toolName,
+              stepName: node.id,
+              durationMs: Date.now() - prevTool.startedAt,
+            });
+            deps.store
+              .createWorkflowEvent({
+                workflow_run_id: workflowRun.id,
+                event_type: 'tool_completed',
+                step_name: node.id,
+                data: {
+                  tool_name: prevTool.toolName,
+                  duration_ms: Date.now() - prevTool.startedAt,
+                },
+              })
+              .catch((err: Error) => {
+                getLog().error(
+                  { err, workflowRunId: workflowRun.id, eventType: 'tool_completed' },
+                  'workflow_event_persist_failed'
+                );
+              });
+            lastToolStartedAt = null;
+          }
+          if (msg.sessionId) newSessionId = msg.sessionId;
+          if (msg.tokens) nodeTokens = msg.tokens;
+          if (msg.cost !== undefined) nodeCostUsd = msg.cost;
+          if (msg.stopReason !== undefined) nodeStopReason = msg.stopReason;
+          if (msg.numTurns !== undefined) nodeNumTurns = msg.numTurns;
+          if (msg.modelUsage) nodeModelUsage = msg.modelUsage;
+          if (msg.structuredOutput !== undefined) structuredOutput = msg.structuredOutput;
+          // Fail the node if the SDK reports a cost cap exceeded error
+          if (msg.isError && msg.errorSubtype === 'error_max_budget_usd') {
+            const cap = nodeOptions?.maxBudgetUsd;
+            getLog().warn(
+              { nodeId: node.id, maxBudgetUsd: cap, durationMs: Date.now() - nodeStartTime },
+              'dag.node_budget_cap_exceeded'
+            );
+            throw new Error(
+              `Node '${node.id}' exceeded cost cap${cap !== undefined ? ` of $${cap.toFixed(2)}` : ''}.`
+            );
+          }
+          // Fail loudly on any other SDK error result. Previously we broke out of
+          // the stream silently, producing empty/partial output without signaling
+          // failure — which let failed iterations masquerade as successes (#1208).
+          if (msg.isError) {
+            const subtype = msg.errorSubtype ?? 'unknown';
+            const errorsDetail = msg.errors?.length ? ` — ${msg.errors.join('; ')}` : '';
+            getLog().error(
+              {
+                nodeId: node.id,
+                errorSubtype: subtype,
+                errors: msg.errors,
+                sessionId: msg.sessionId,
+                stopReason: msg.stopReason,
+                durationMs: Date.now() - nodeStartTime,
+              },
+              'dag.node_sdk_error_result'
+            );
+            throw new Error(`Node '${node.id}' failed: SDK returned ${subtype}${errorsDetail}`);
+          }
+          break; // Result is the "I'm done" signal — don't wait for subprocess to exit
+        } else if (msg.type === 'system' && msg.content) {
+          // Providers yield system chunks for user-actionable issues (missing env
+          // vars, Haiku+MCP, structured output failures, etc.). MCP-failure
+          // chunks need filtering: user-level plugin MCPs inherited from
+          // `~/.claude/` (e.g. `telegram`) routinely fail to connect inside the
+          // headless subprocess and aren't actionable for the workflow author.
+          // Other warnings (⚠️) are always actionable and surface verbatim.
+          if (msg.content.startsWith(MCP_FAILURE_PREFIX)) {
+            const failedEntries = parseMcpFailureServerNames(msg.content);
+            const workflowFailures = failedEntries.filter(e => configuredMcpNames.has(e.name));
+            const pluginFailures = failedEntries.filter(e => !configuredMcpNames.has(e.name));
+
+            if (workflowFailures.length > 0) {
+              const filteredMsg = `${MCP_FAILURE_PREFIX}${workflowFailures.map(e => e.segment).join(', ')}`;
+              getLog().warn(
+                { nodeId: node.id, systemContent: filteredMsg },
+                'dag.provider_warning_forwarded'
+              );
+              const delivered = await safeSendMessage(
+                platform,
+                conversationId,
+                filteredMsg,
+                nodeContext
+              );
+              if (!delivered) {
+                getLog().error(
+                  { nodeId: node.id, workflowRunId: workflowRun.id },
+                  'dag.provider_warning_delivery_failed'
+                );
+              }
+            }
+            if (pluginFailures.length > 0) {
+              getLog().debug(
+                { nodeId: node.id, pluginFailures: pluginFailures.map(e => e.name) },
+                'dag.mcp_plugin_connection_suppressed'
+              );
+            }
+          } else if (msg.content.startsWith('⚠️')) {
+            getLog().warn(
+              { nodeId: node.id, systemContent: msg.content },
               'dag.provider_warning_forwarded'
             );
             const delivered = await safeSendMessage(
               platform,
               conversationId,
-              filteredMsg,
+              msg.content,
               nodeContext
             );
             if (!delivered) {
@@ -987,38 +1692,25 @@ async function executeNodeInternal(
                 'dag.provider_warning_delivery_failed'
               );
             }
-          }
-          if (pluginFailures.length > 0) {
+          } else {
             getLog().debug(
-              { nodeId: node.id, pluginFailures: pluginFailures.map(e => e.name) },
-              'dag.mcp_plugin_connection_suppressed'
+              { nodeId: node.id, systemContent: msg.content },
+              'dag.system_message_unhandled'
             );
           }
-        } else if (msg.content.startsWith('⚠️')) {
-          getLog().warn(
-            { nodeId: node.id, systemContent: msg.content },
-            'dag.provider_warning_forwarded'
-          );
-          const delivered = await safeSendMessage(
-            platform,
-            conversationId,
-            msg.content,
-            nodeContext
-          );
-          if (!delivered) {
-            getLog().error(
-              { nodeId: node.id, workflowRunId: workflowRun.id },
-              'dag.provider_warning_delivery_failed'
-            );
-          }
-        } else {
-          getLog().debug(
-            { nodeId: node.id, systemContent: msg.content },
-            'dag.system_message_unhandled'
-          );
         }
+        // rate_limit chunks: already log.warn'd in claude.ts; not surfaced to SSE per design
       }
-      // rate_limit chunks: already log.warn'd in claude.ts; not surfaced to SSE per design
+      return undefined;
+    })();
+    let earlyStreamResult: NodeExecutionResult | undefined;
+    try {
+      earlyStreamResult = await Promise.race([streamPromise, watchdogPromise]);
+    } finally {
+      clearWatchdog();
+    }
+    if (earlyStreamResult) {
+      return earlyStreamResult;
     }
 
     // When output_format is set and the provider returned structured_output,
@@ -1069,8 +1761,51 @@ async function executeNodeInternal(
       );
     }
 
+    if (nodeToolTimedOut) {
+      const timedOutTool = nodeToolTimedOut as { toolName: string; elapsedMs: number };
+      const duration = Date.now() - nodeStartTime;
+      const timeoutError = `Tool '${timedOutTool.toolName}' in node '${node.id}' timed out after ${String(Math.round(timedOutTool.elapsedMs / 1000))}s without producing a result.`;
+      getLog().warn(
+        { nodeId: node.id, toolName: timedOutTool.toolName, durationMs: duration },
+        'dag_node_tool_timeout_failed'
+      );
+      await logNodeError(logDir, workflowRun.id, node.id, timeoutError);
+
+      deps.store
+        .createWorkflowEvent({
+          workflow_run_id: workflowRun.id,
+          event_type: 'node_failed',
+          step_name: node.id,
+          data: { error: timeoutError, duration_ms: duration },
+        })
+        .catch((err: Error) => {
+          getLog().error(
+            { err, workflowRunId: workflowRun.id, eventType: 'node_failed' },
+            'workflow_event_persist_failed'
+          );
+        });
+
+      emitter.emit({
+        type: 'node_failed',
+        runId: workflowRun.id,
+        nodeId: node.id,
+        nodeName: node.command ?? node.id,
+        error: timeoutError,
+      });
+
+      lastNodeCancelCheck.delete(`${workflowRun.id}:${node.id}`);
+      lastNodeActivityUpdate.delete(`${workflowRun.id}:${node.id}`);
+
+      return {
+        state: 'failed',
+        output: nodeOutputText,
+        error: timeoutError,
+        nonRetryable: true,
+      };
+    }
+
     // If cancelled during streaming (not idle timeout), return as failed with cancel reason
-    if (nodeAbortController.signal.aborted && !nodeIdleTimedOut) {
+    if (nodeAbortController.signal.aborted && !nodeIdleTimedOut && !nodeToolTimedOut) {
       const duration = Date.now() - nodeStartTime;
       getLog().info(
         { nodeId: node.id, durationMs: duration },
@@ -1250,7 +1985,12 @@ async function executeNodeInternal(
     lastNodeActivityUpdate.delete(`${workflowRun.id}:${node.id}`);
 
     // If the abort was triggered by user cancel (not idle timeout), classify as cancel
-    if (nodeAbortController.signal.aborted && !nodeIdleTimedOut) {
+    if (
+      nodeAbortController.signal.aborted &&
+      !nodeIdleTimedOut &&
+      !nodeToolTimedOut &&
+      !nodeSafetyViolation
+    ) {
       getLog().info({ nodeId: node.id }, 'dag_node_cancelled_via_abort');
       return {
         state: 'failed',
@@ -1285,7 +2025,17 @@ async function executeNodeInternal(
       error: err.message,
     });
 
-    return { state: 'failed', output: '', error: err.message, costUsd: nodeCostUsd };
+    // Safety violations (path-allowlist + tool-timeout) must short-circuit the
+    // retry policy. Detect via the typed error class OR the local flag set at
+    // the safety throw site — both should carry the same signal.
+    const nonRetryable = err instanceof WorkflowNonRetryableError || nodeSafetyViolation;
+    return {
+      state: 'failed',
+      output: '',
+      error: err.message,
+      costUsd: nodeCostUsd,
+      ...(nonRetryable ? { nonRetryable: true } : {}),
+    };
   }
 }
 
@@ -1355,10 +2105,7 @@ async function executeBashNode(
   const timeout = node.timeout ?? SUBPROCESS_DEFAULT_TIMEOUT;
   const subprocessEnv: NodeJS.ProcessEnv = {
     ...process.env,
-    ARTIFACTS_DIR: artifactsDir,
-    LOG_DIR: logDir,
-    BASE_BRANCH: baseBranch,
-    ...(envVars ?? {}),
+    ...buildWorkflowRuntimeEnv(artifactsDir, logDir, baseBranch, envVars),
   };
 
   try {
@@ -1520,8 +2267,10 @@ async function executeScriptNode(
   const finalScript = substituteNodeOutputRefs(substitutedScript, nodeOutputs, false);
 
   const timeout = node.timeout ?? SUBPROCESS_DEFAULT_TIMEOUT;
-  const subprocessEnv =
-    envVars && Object.keys(envVars).length > 0 ? { ...process.env, ...envVars } : undefined;
+  const subprocessEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...buildWorkflowRuntimeEnv(artifactsDir, logDir, baseBranch, envVars),
+  };
 
   // Build the command and args based on runtime and inline vs named
   let cmd = '';
@@ -1872,6 +2621,7 @@ async function executeLoopNode(
     let fullOutput = ''; // raw, for signal detection
     let cleanOutput = ''; // stripped, for platform display
     let iterationIdleTimedOut = false;
+    let iterationToolTimedOut: { toolName: string; elapsedMs: number } | null = null;
     const iterationAbortController = new AbortController();
 
     try {
@@ -1898,6 +2648,7 @@ async function executeLoopNode(
 
       const iterationOptions: SendQueryOptions | undefined = {
         ...resolvedOptions,
+        env: buildWorkflowRuntimeEnv(artifactsDir, logDir, baseBranch, resolvedOptions.env),
         abortSignal: iterationAbortController.signal,
       };
 
@@ -1905,15 +2656,35 @@ async function executeLoopNode(
       let lastToolStartedAt: { toolName: string; startedAt: number } | null = null;
 
       const effectiveIdleTimeout = node.idle_timeout ?? STEP_IDLE_TIMEOUT_MS;
+      const effectiveToolTimeout = Math.min(effectiveIdleTimeout, getWorkflowToolCallTimeoutMs());
 
-      for await (const msg of withIdleTimeout(generator, effectiveIdleTimeout, () => {
-        iterationIdleTimedOut = true;
-        getLog().warn(
-          { nodeId: node.id, iteration: i, timeoutMs: effectiveIdleTimeout },
-          'loop_node.idle_timeout_reached'
-        );
-        iterationAbortController.abort();
-      })) {
+      for await (const msg of withProviderTimeouts(
+        generator,
+        effectiveIdleTimeout,
+        effectiveToolTimeout,
+        () => {
+          iterationIdleTimedOut = true;
+          getLog().warn(
+            { nodeId: node.id, iteration: i, timeoutMs: effectiveIdleTimeout },
+            'loop_node.idle_timeout_reached'
+          );
+          iterationAbortController.abort();
+        },
+        (tool, elapsedMs) => {
+          iterationToolTimedOut = { toolName: tool.toolName, elapsedMs };
+          getLog().warn(
+            {
+              nodeId: node.id,
+              iteration: i,
+              toolName: tool.toolName,
+              timeoutMs: effectiveToolTimeout,
+              elapsedMs,
+            },
+            'loop_node.tool_timeout_reached'
+          );
+          iterationAbortController.abort();
+        }
+      )) {
         if (msg.type === 'assistant') {
           fullOutput += msg.content;
           const cleaned = stripCompletionTags(msg.content, loop.until);
@@ -1981,6 +2752,18 @@ async function executeLoopNode(
           break; // Result is the "I'm done" signal — don't wait for subprocess to exit
         } else if (msg.type === 'tool' && msg.toolName) {
           const now = Date.now();
+          const disallowedPath = getDisallowedToolPath(
+            msg.toolName,
+            msg.toolInput,
+            cwd,
+            getWorkflowAllowedToolRoots(cwd, artifactsDir, logDir)
+          );
+          if (disallowedPath) {
+            iterationAbortController.abort();
+            throw new WorkflowNonRetryableError(
+              `Tool '${msg.toolName}' in loop '${node.id}' targeted path outside the workflow working path: ${disallowedPath}`
+            );
+          }
 
           // Emit tool_completed for the previous tool
           if (lastToolStartedAt) {
@@ -2050,6 +2833,13 @@ async function executeLoopNode(
         }
         // rate_limit chunks: already log.warn'd in claude.ts; not surfaced to SSE per design
       }
+
+      if (iterationToolTimedOut) {
+        const timedOutTool = iterationToolTimedOut as { toolName: string; elapsedMs: number };
+        throw new WorkflowNonRetryableError(
+          `Tool '${timedOutTool.toolName}' in loop '${node.id}' timed out after ${String(Math.round(timedOutTool.elapsedMs / 1000))}s without producing a result.`
+        );
+      }
     } catch (error) {
       const err = error as Error;
       const duration = Date.now() - iterationStart;
@@ -2071,11 +2861,13 @@ async function executeLoopNode(
         .catch((evtErr: Error) => {
           logEventStoreError(evtErr, i);
         });
+      const nonRetryable = err instanceof WorkflowNonRetryableError;
       return {
         state: 'failed',
         output: '',
         error: `Loop iteration ${i} failed: ${err.message}`,
         costUsd: loopTotalCostUsd,
+        ...(nonRetryable ? { nonRetryable: true } : {}),
       };
     }
 
@@ -2543,6 +3335,17 @@ export async function executeDagWorkflow(
   priorCompletedNodes?: Map<string, string>
 ): Promise<string | undefined> {
   const dagStartTime = Date.now();
+  const workflowCwd = workflowRun.working_path ?? cwd;
+  if (workflowRun.working_path && resolvePath(workflowRun.working_path) !== resolvePath(cwd)) {
+    getLog().warn(
+      {
+        workflowRunId: workflowRun.id,
+        requestedCwd: cwd,
+        workingPath: workflowRun.working_path,
+      },
+      'dag.workflow_cwd_overridden_by_working_path'
+    );
+  }
   const workflowLevelOptions = {
     effort: workflow.effort,
     thinking: workflow.thinking,
@@ -2550,6 +3353,8 @@ export async function executeDagWorkflow(
     betas: workflow.betas,
     sandbox: workflow.sandbox,
   };
+  const workflowScratchDir = getWorkflowScratchDir(artifactsDir);
+  await mkdir(workflowScratchDir, { recursive: true });
   const layers = buildTopologicalLayers(workflow.nodes);
   const nodeOutputs = new Map<string, NodeOutput>();
 
@@ -2752,7 +3557,7 @@ export async function executeDagWorkflow(
               deps,
               platform,
               conversationId,
-              cwd,
+              workflowCwd,
               workflowRun,
               node,
               artifactsDir,
@@ -2792,7 +3597,7 @@ export async function executeDagWorkflow(
               deps,
               platform,
               conversationId,
-              cwd,
+              workflowCwd,
               workflowRun,
               node,
               loopProvider,
@@ -2819,7 +3624,7 @@ export async function executeDagWorkflow(
               conversationId,
               workflowProvider,
               workflowModel,
-              cwd,
+              workflowCwd,
               artifactsDir,
               logDir,
               baseBranch,
@@ -2871,7 +3676,7 @@ export async function executeDagWorkflow(
               deps,
               platform,
               conversationId,
-              cwd,
+              workflowCwd,
               workflowRun,
               node,
               artifactsDir,
@@ -2898,7 +3703,7 @@ export async function executeDagWorkflow(
             platform,
             conversationId,
             workflowRun.id,
-            cwd,
+            workflowCwd,
             workflowLevelOptions
           );
           const providerMeta = getNodeProviderDisplayMeta(provider, config, model);
@@ -2922,7 +3727,7 @@ export async function executeDagWorkflow(
               deps,
               platform,
               conversationId,
-              cwd,
+              workflowCwd,
               workflowRun,
               node,
               providerMeta,
@@ -2943,12 +3748,16 @@ export async function executeDagWorkflow(
 
             // Check if retryable.
             // FATAL errors (auth, permissions, credit balance) are never retried even when on_error:all.
+            // Safety violations (path allowlist, tool-call timeout) carry a structured
+            // `nonRetryable` flag set at the throw site — see WorkflowNonRetryableError.
             const isFatal = output.error
               ? classifyError(new Error(output.error)) === 'FATAL'
               : false;
+            const isSafetyError = output.nonRetryable === true;
             const isTransient = output.error ? isTransientNodeError(output.error) : false;
             const shouldRetry =
               !isFatal &&
+              !isSafetyError &&
               (retryConfig.onError === 'all' ||
                 (retryConfig.onError === 'transient' && isTransient));
 
@@ -3055,8 +3864,8 @@ export async function executeDagWorkflow(
           },
           'dag.stop_detected_between_layers'
         );
-        // Paused is intentional (approval gate) — the approval message was already sent
-        if (effectiveStatus !== 'paused') {
+        // Paused/blocked are intentional human-waiting states — their messages were already sent.
+        if (effectiveStatus !== 'paused' && effectiveStatus !== 'blocked') {
           await safeSendMessage(
             platform,
             conversationId,
@@ -3083,32 +3892,55 @@ export async function executeDagWorkflow(
    * Emitter unregister is conditional: terminal states (cancelled / deleted /
    * completed / failed) unregister to release subscription resources, but
    * `paused` keeps the emitter registered so SSE stays connected while the
-   * approval gate awaits the user — crucial for resume observability.
+   * approval gate or blocked human-input node awaits the user — crucial for
+   * resume/response observability.
    */
   async function skipIfStatusChanged(logEvent: string): Promise<boolean> {
     const status = await deps.store.getWorkflowRunStatus(workflowRun.id);
     if (status === 'running') return false;
     getLog().info({ workflowRunId: workflowRun.id, status: status ?? 'deleted' }, logEvent);
-    if (status !== 'paused') {
+    if (status !== 'paused' && status !== 'blocked') {
       getWorkflowEventEmitter().unregisterRun(workflowRun.id);
     }
     return true;
   }
 
   // Single-pass: compute node outcome counts and derive success/failure booleans
-  const nodeCounts = { completed: 0, failed: 0, skipped: 0, total: workflow.nodes.length };
+  const nodeCounts = {
+    completed: 0,
+    failed: 0,
+    skipped: 0,
+    blocked: 0,
+    total: workflow.nodes.length,
+  };
   for (const o of nodeOutputs.values()) {
     if (o.state === 'completed') nodeCounts.completed++;
     else if (o.state === 'failed') nodeCounts.failed++;
     else if (o.state === 'skipped') nodeCounts.skipped++;
+    else if (o.state === 'blocked') nodeCounts.blocked++;
   }
   const anyCompleted = nodeCounts.completed > 0;
   const anyFailed = nodeCounts.failed > 0;
+  const anyBlocked = nodeCounts.blocked > 0;
 
   getLog().info(
-    { nodeCount: workflow.nodes.length, anyCompleted, anyFailed },
+    { nodeCount: workflow.nodes.length, anyCompleted, anyFailed, anyBlocked },
     'dag_workflow_finished'
   );
+
+  // `failed` takes precedence over `blocked`: a parallel layer with one
+  // failed node and one human-input node can no longer succeed even if the
+  // user answers the question, so marking the run `blocked` would trap them
+  // in a resumable state that resume cannot actually fix. Fall through to
+  // the `anyFailed` branch in that case.
+  if (anyBlocked && !anyFailed) {
+    if (await skipIfStatusChanged('dag.skip_blocked_status_changed')) return;
+    await deps.store.updateWorkflowRun(workflowRun.id, {
+      status: 'blocked',
+      metadata: { node_counts: nodeCounts },
+    });
+    return;
+  }
 
   if (!anyCompleted) {
     if (await skipIfStatusChanged('dag.skip_fail_status_changed')) return;

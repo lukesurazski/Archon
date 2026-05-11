@@ -60,15 +60,35 @@ Then start the backend separately with `bun run dev:server`. The Web UI will be 
 
 The Web UI is a dark-themed single-page application with four main areas:
 
+### Top Navigation
+
+| Tab | Route | Purpose |
+|-----|-------|---------|
+| Tasks | `/chat` (default) | The task workspace -- conversations and workflow runs grouped by task |
+| Dashboard | `/dashboard` | Cross-project workflow run monitor |
+| Workflows | `/workflows` | Workflow listing and Workflow Builder |
+| Settings | `/settings` | Assistant defaults, project registration |
+
 ### Left Sidebar
 
-- **Conversations list** -- All your chat conversations, searchable and grouped by project. Click to switch, right-click or hover for rename/delete.
-- **Project selector** -- Registered codebases appear here. Select a project to scope conversations and workflows to that repository. You can also register new projects (clone from URL or register a local path) and remove existing ones.
-- **Workflow invoker** -- A quick-launch panel for running workflows. Select a workflow from the dropdown, type a message, and hit Run. This creates a new conversation and starts the workflow in one action.
+- **Tasks list** -- Conversations and workflow runs are grouped under tasks (a task represents a unit of work, typically a branch + PR). Active tasks appear at the top; archived tasks collapse under an "Archived" toggle. Click a task to open its dedicated page at `/chat/tasks/<id>`.
+- **Project selector** -- Registered codebases appear here. Select a project to scope the task list and workflow invoker to that repository. You can also register new projects (clone from URL or register a local path) and remove existing ones.
+- **Workflow invoker** -- A quick-launch panel for running workflows. Select a workflow from the dropdown, type a message, and hit Run. Workflows that declare `inputs:` metadata in their YAML pick up a labelled input field with the right placeholder text.
 
-### Main Chat Area
+### Main Workspace
 
-The center of the screen is the chat interface -- this is where you interact with the AI assistant. It works like any chat application, with some additions specific to coding workflows.
+The center of the screen shows either the task workspace (default at `/chat`) or a specific task's page at `/chat/tasks/<id>`. Inside a task, conversations appear on one side and a workflow runner on the other. Each conversation looks and behaves like a standard chat thread.
+
+## Tasks
+
+A **task** is a Web UI container that groups one or more conversations and workflow runs under a single user-facing unit of work -- typically a branch and a pull request. Tasks have a title, optional description, optional `branch_name` and `pr_url`/`pr_number`, and a `status` of `active` or `archived`.
+
+- **Create a task** -- From the sidebar's Tasks button, or via `POST /api/tasks` (see the [API reference](/reference/api/#tasks)).
+- **Open a task** -- Click any task in the sidebar; the task page (`/chat/tasks/:id`) shows its conversations on one side and a workflow runner on the other.
+- **Run a workflow inside a task** -- Use the task page's workflow runner. Background runs (e.g. comprehensive PR review) inherit the parent conversation's task and surface in the task's workflow history.
+- **Archive / restore** -- Archiving (sidebar action or `DELETE /api/tasks/{id}`) sets `status = 'archived'`; conversations are preserved. Restore by PATCHing `status: 'active'`.
+
+Tasks are a Web UI concept only. CLI, Slack, Telegram, and GitHub adapters continue to operate on conversations directly; conversations from those adapters are backfilled into tasks on first server start after upgrade (one task per pre-existing visible conversation).
 
 ### Command Center (Dashboard)
 
@@ -83,11 +103,11 @@ Accessible via the `/dashboard` route, the Command Center shows all workflow run
 
 The `/settings` page lets you configure assistant defaults (model, provider) without editing YAML files. It also includes a **Projects** section for registering and managing codebases.
 
-## Chat Interface
+## Conversations Inside a Task
 
 ### Creating Conversations
 
-Click the "New Chat" button in the sidebar, or use the workflow invoker to create a conversation that immediately starts a workflow. Each conversation gets a unique ID and persists across page refreshes.
+Click the **Tasks** button in the sidebar to create a new task and its first conversation, or use the workflow invoker to create a conversation that immediately starts a workflow. Each conversation gets a unique ID, is attached to a task, and persists across page refreshes.
 
 If a project is selected in the sidebar, new conversations are automatically scoped to that codebase.
 
