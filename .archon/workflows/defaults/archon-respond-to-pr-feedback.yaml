@@ -248,12 +248,41 @@ nodes:
       fi
 
   - id: implement
-    depends_on: [check-actionable]
+    depends_on: [record-head-before-implement]
     when: "$check-actionable.output == 'actionable'"
     command: archon-implement-review-fixes
 
-  - id: bump-iteration
+  - id: record-head-before-implement
+    depends_on: [check-actionable]
+    when: "$check-actionable.output == 'actionable'"
+    bash: |
+      set -euo pipefail
+      git rev-parse HEAD > "$ARTIFACTS_DIR/.pre-implement-head"
+      echo "recorded pre-implement HEAD"
+
+  - id: verify-implementation
     depends_on: [implement]
+    bash: |
+      set -euo pipefail
+      REPORT="$ARTIFACTS_DIR/review/fix-report.md"
+      if [ ! -s "$REPORT" ]; then
+        echo "FATAL: implementation step did not write $REPORT" >&2
+        exit 1
+      fi
+      if grep -Eiq '^\*\*Status\*\*:[[:space:]]*BLOCKED|^Status:[[:space:]]*BLOCKED|BLOCKED[[:space:]]+—[[:space:]]+fixes not applied' "$REPORT"; then
+        echo "FATAL: implementation step reported BLOCKED; leaving workflow failed instead of completed." >&2
+        exit 1
+      fi
+      BEFORE=$(cat "$ARTIFACTS_DIR/.pre-implement-head")
+      AFTER=$(git rev-parse HEAD)
+      if [ "$BEFORE" = "$AFTER" ]; then
+        echo "FATAL: implementation step produced no new commit." >&2
+        exit 1
+      fi
+      echo "implementation verified"
+
+  - id: bump-iteration
+    depends_on: [verify-implementation]
     bash: |
       set -euo pipefail
       PR_NUMBER=$(cat "$ARTIFACTS_DIR/.pr-number")
