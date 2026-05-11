@@ -2604,11 +2604,7 @@ describe('executeDagWorkflow -- provider tool safety', () => {
       // `$HOME` prefix. Without this guard we would wrongly poison legitimate
       // tokens like `$HOMEDIRECTORY`.
       process.env.HOME = '/Users/test-home';
-      const result = getDisallowedToolPath(
-        'Bash',
-        { command: `cat ${join(testDir, 'src.ts')}` },
-        testDir
-      );
+      const result = getDisallowedToolPath('Bash', { command: 'cat $HOMEDIR/src.ts' }, testDir);
       expect(result).toBeNull();
     });
   });

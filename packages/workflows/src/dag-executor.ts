@@ -345,6 +345,12 @@ const EXPANDABLE_SHELL_VARS = new Set(['HOME', 'TMPDIR', 'TMP', 'TEMP']);
 // `$VAR` token resolved under cwd.
 const UNRESOLVED_SHELL_VAR_ROOT = '/__archon_unresolved_shell_var__';
 
+function startsWithExpandableShellVarName(name: string): boolean {
+  return [...EXPANDABLE_SHELL_VARS].some(
+    expandableName => name !== expandableName && name.startsWith(expandableName)
+  );
+}
+
 function expandShellVarPrefix(token: string): string | null {
   // Returns the expanded path if `token` starts with a `$VAR`/`${VAR}` prefix
   // followed by `/` or end-of-string. Allowlisted vars are expanded via
@@ -359,6 +365,9 @@ function expandShellVarPrefix(token: string): string | null {
   // variable as its first segment. `$VARfoo` is a different identifier and
   // should not be expanded as a path prefix.
   if (rest !== '' && !rest.startsWith('/')) return null;
+  if (!EXPANDABLE_SHELL_VARS.has(name) && startsWithExpandableShellVarName(name)) {
+    return null;
+  }
   if (EXPANDABLE_SHELL_VARS.has(name)) {
     const value = process.env[name];
     if (typeof value === 'string' && value !== '' && isAbsolute(value)) {
