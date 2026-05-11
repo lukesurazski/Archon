@@ -239,6 +239,21 @@ function extractReadShellPaths(command: string): string[] {
     for (const path of extractShellPaths(segment)) {
       paths.add(path);
     }
+    // Capture relative (`./`, `../`) and home-relative (`~/`) targets that the
+    // absolute-only scan misses. Without this, `cat ../secret` or
+    // `grep foo ~/notes.txt` would bypass the read allowlist.
+    for (const rawToken of tokenizeShellSegment(segment)) {
+      if (!rawToken || rawToken.startsWith('-')) continue;
+      const token = normalizeHomeRelative(rawToken);
+      if (shouldIgnoreShellPath(token)) continue;
+      if (looksLikeShellPath(token) && !token.startsWith('/')) {
+        paths.add(token);
+      } else if (token !== rawToken && isAbsolute(token)) {
+        // `~/foo` expanded to an absolute path under $HOME — record so the
+        // allowlist check catches it instead of resolving relative to cwd.
+        paths.add(token);
+      }
+    }
   }
   return [...paths];
 }
@@ -1183,49 +1198,36 @@ async function executeNodeInternal(
       }
     };
     const watchdogPromise = new Promise<never>((_, reject) => {
-      const tickMs = Math.min(1000, effectiveToolTimeout, effectiveIdleTimeout);
+      // Tool-only watchdog: enforce per-tool-call timeouts when the
+      // provider stops yielding while a tool is active. Idle-timeout
+      // handling is owned by withProviderTimeouts() so it can drive the
+      // soft "completed via idle timeout" recovery path; duplicating that
+      // here previously turned soft idle timeouts into non-retryable
+      // failures.
+      const tickMs = Math.min(1000, effectiveToolTimeout);
       watchdogTimer = setInterval(() => {
+        if (!watchdogActiveTool) return;
         const now = Date.now();
-        if (watchdogActiveTool) {
-          const timedOutTool = watchdogActiveTool;
-          const elapsedMs = now - timedOutTool.startedAt;
-          if (elapsedMs >= effectiveToolTimeout) {
-            nodeToolTimedOut = { toolName: timedOutTool.toolName, elapsedMs };
-            getLog().warn(
-              {
-                nodeId: node.id,
-                toolName: timedOutTool.toolName,
-                timeoutMs: effectiveToolTimeout,
-                elapsedMs,
-              },
-              'dag_node_tool_watchdog_timeout_reached'
-            );
-            nodeAbortController.abort();
-            clearWatchdog();
-            reject(
-              new WorkflowNonRetryableError(
-                `Tool '${timedOutTool.toolName}' in node '${node.id}' timed out after ${String(Math.round(elapsedMs / 1000))}s without producing a result.`
-              )
-            );
-          }
-          return;
-        }
-
-        const idleMs = now - lastProviderYieldAt;
-        if (idleMs >= effectiveIdleTimeout) {
-          nodeIdleTimedOut = true;
-          getLog().warn(
-            { nodeId: node.id, timeoutMs: effectiveIdleTimeout, idleMs },
-            'dag_node_idle_watchdog_timeout_reached'
-          );
-          nodeAbortController.abort();
-          clearWatchdog();
-          reject(
-            new WorkflowNonRetryableError(
-              `Node '${node.id}' timed out after ${String(Math.round(idleMs / 1000))}s without provider activity.`
-            )
-          );
-        }
+        const timedOutTool = watchdogActiveTool;
+        const elapsedMs = now - timedOutTool.startedAt;
+        if (elapsedMs < effectiveToolTimeout) return;
+        nodeToolTimedOut = { toolName: timedOutTool.toolName, elapsedMs };
+        getLog().warn(
+          {
+            nodeId: node.id,
+            toolName: timedOutTool.toolName,
+            timeoutMs: effectiveToolTimeout,
+            elapsedMs,
+          },
+          'dag_node_tool_watchdog_timeout_reached'
+        );
+        nodeAbortController.abort();
+        clearWatchdog();
+        reject(
+          new WorkflowNonRetryableError(
+            `Tool '${timedOutTool.toolName}' in node '${node.id}' timed out after ${String(Math.round(elapsedMs / 1000))}s without producing a result.`
+          )
+        );
       }, tickMs);
     });
     const streamPromise = (async (): Promise<NodeExecutionResult | undefined> => {

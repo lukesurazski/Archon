@@ -127,7 +127,7 @@ curl http://localhost:3637/api/conversations/<id>/messages
 **Notes:**
 - Use the web API for manual validation — avoids running multiple platform adapters
 - Database is shared with the main checkout
-- Kill the server when done: terminate by the allocated port (e.g., macOS/Linux: `lsof -ti :3637 | xargs kill`; Windows PowerShell: `Get-NetTCPConnection -LocalPort 3637 | Stop-Process -Id { $_.OwningProcess } -Force`) — avoid broad `pkill -f "bun.*dev"` patterns that can kill unrelated processes
+- Kill the server when done: terminate by the allocated port (e.g., macOS/Linux: `lsof -ti :3637 | xargs kill`; Windows PowerShell: `Stop-Process -Id (Get-NetTCPConnection -LocalPort 3637).OwningProcess -Force`) — avoid broad `pkill -f "bun.*dev"` patterns that can kill unrelated processes
 
 ## `.archon/config.yaml` — Assistant Defaults
 
