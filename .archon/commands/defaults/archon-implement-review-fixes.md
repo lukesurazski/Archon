@@ -25,6 +25,8 @@ Read the consolidated review artifact and implement all CRITICAL, HIGH, MEDIUM a
 **Git action**: Commit AND push fixes to the PR branch
 **GitHub action**: Post fix report comment
 
+**Workflow worktree guard**: The current process working directory is the workflow's isolated worktree. Treat `pwd` as the repository root for this run. Do not `cd` into another checkout, do not edit paths outside this worktree, and do not use absolute file paths copied from review artifacts unless they are first converted to paths relative to the current worktree.
+
 ---
 
 ## Phase 1: LOAD - Get Fix List
@@ -39,15 +41,23 @@ HEAD_BRANCH=$(gh pr view $PR_NUMBER --json headRefName --jq '.headRefName')
 echo "PR: $PR_NUMBER, Branch: $HEAD_BRANCH"
 ```
 
-### 1.2 Checkout the PR Branch
+### 1.2 Verify the Workflow Worktree
 
-**CRITICAL: Work on the PR's actual branch, not a new branch.**
+**CRITICAL: Stay inside the workflow worktree.** The workflow runner already created and checked out an isolated worktree for this PR branch. Do not switch to another checkout from `git worktree list`, and do not `cd` into the canonical repository path.
 
 ```bash
-# Fetch and checkout the PR's branch
+WORKTREE_ROOT=$(pwd -P)
+CURRENT_BRANCH=$(git branch --show-current)
+
 git fetch origin $HEAD_BRANCH
-git checkout $HEAD_BRANCH
-git pull origin $HEAD_BRANCH
+
+if [ "$CURRENT_BRANCH" != "$HEAD_BRANCH" ]; then
+  echo "FATAL: workflow worktree is on $CURRENT_BRANCH, expected $HEAD_BRANCH."
+  echo "Do not cd into another checkout. Fix the workflow worktree branch before rerunning."
+  exit 1
+fi
+
+git pull --ff-only origin $HEAD_BRANCH
 ```
 
 ### 1.3 Read Consolidated Review
@@ -76,11 +86,12 @@ cat $ARTIFACTS_DIR/review/docs-impact-findings.md
 ### 1.5 Check Current Git State
 
 ```bash
+pwd -P
 git status --porcelain
 git branch --show-current
 ```
 
-Verify you are on the correct PR branch (should be `$HEAD_BRANCH`).
+Verify you are in the workflow worktree root and on the correct PR branch (should be `$HEAD_BRANCH`). Existing local changes in this worktree are in-scope WIP for the PR unless they are clearly unrelated scratch files.
 
 **PHASE_1_CHECKPOINT:**
 - [ ] PR number identified
@@ -91,6 +102,12 @@ Verify you are on the correct PR branch (should be `$HEAD_BRANCH`).
 ---
 
 ## Phase 2: IMPLEMENT - Apply Fixes
+
+Before editing any file:
+- Use only paths under `$WORKTREE_ROOT`.
+- Prefer repo-relative paths like `packages/core/src/db/tasks.ts`.
+- If an artifact mentions an absolute path outside `$WORKTREE_ROOT`, strip the repository prefix and edit the matching repo-relative path under `$WORKTREE_ROOT`.
+- If a tool reports that a target path is outside the workflow working path, stop and mark the finding BLOCKED; do not try another checkout.
 
 ### 2.1 For Each CRITICAL Issue
 

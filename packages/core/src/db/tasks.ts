@@ -73,11 +73,11 @@ function taskSummarySelect(): string {
       WHERE c.task_id = t.id AND c.deleted_at IS NULL) AS conversation_count,
     (SELECT r.status FROM remote_agent_workflow_runs r
       JOIN remote_agent_conversations c ON c.id = COALESCE(r.parent_conversation_id, r.conversation_id)
-      WHERE c.task_id = t.id
+      WHERE c.task_id = t.id AND c.deleted_at IS NULL
       ORDER BY r.started_at DESC LIMIT 1) AS latest_run_status,
     (SELECT r.started_at FROM remote_agent_workflow_runs r
       JOIN remote_agent_conversations c ON c.id = COALESCE(r.parent_conversation_id, r.conversation_id)
-      WHERE c.task_id = t.id
+      WHERE c.task_id = t.id AND c.deleted_at IS NULL
       ORDER BY r.started_at DESC LIMIT 1) AS latest_run_started_at,
     (SELECT MAX(c.last_activity_at) FROM remote_agent_conversations c
       WHERE c.task_id = t.id AND c.deleted_at IS NULL) AS last_activity_at
@@ -136,7 +136,7 @@ export async function getTaskDetail(id: string): Promise<TaskDetail | null> {
       `SELECT DISTINCT r.* FROM remote_agent_workflow_runs r
        JOIN remote_agent_conversations c
          ON c.id = r.conversation_id OR c.id = r.parent_conversation_id
-       WHERE c.task_id = $1
+       WHERE c.task_id = $1 AND c.deleted_at IS NULL
        ORDER BY r.started_at DESC
        LIMIT 50`,
       [id]
