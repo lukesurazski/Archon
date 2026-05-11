@@ -1338,7 +1338,13 @@ describe('executeDagWorkflow -- bash nodes', () => {
       'bash',
       ['-c', 'echo ok'],
       expect.objectContaining({
-        env: expect.objectContaining({ MY_SECRET: 'abc123' }),
+        env: expect.objectContaining({
+          MY_SECRET: 'abc123',
+          TMPDIR: join(testDir, 'artifacts', 'tmp'),
+          TMP: join(testDir, 'artifacts', 'tmp'),
+          TEMP: join(testDir, 'artifacts', 'tmp'),
+          WORKFLOW_TMPDIR: join(testDir, 'artifacts', 'tmp'),
+        }),
       })
     );
     execSpy.mockRestore();
@@ -2172,7 +2178,7 @@ describe('executeDagWorkflow -- provider tool safety', () => {
     }
   });
 
-  it('detects file tool paths outside the workflow working path', () => {
+  it('detects file tool paths outside the workflow working path', async () => {
     expect(getDisallowedToolPath('Edit', { file_path: join(outsideDir, 'src.ts') }, testDir)).toBe(
       join(outsideDir, 'src.ts')
     );
@@ -2187,6 +2193,20 @@ describe('executeDagWorkflow -- provider tool safety', () => {
         outsideDir,
       ])
     ).toBeNull();
+    const artifactsDir = join(testDir, 'artifacts');
+    const workflowScratchDir = join(artifactsDir, 'tmp');
+    await mkdir(workflowScratchDir, { recursive: true });
+    expect(
+      getDisallowedToolPath(
+        'Bash',
+        { command: `touch ${join(workflowScratchDir, 'build-review.py')}` },
+        testDir,
+        [artifactsDir]
+      )
+    ).toBeNull();
+    expect(getDisallowedToolPath('Bash', { command: 'touch /tmp/build-review.py' }, testDir)).toBe(
+      '/tmp/build-review.py'
+    );
     expect(
       getDisallowedToolPath(
         'Bash',
@@ -6050,6 +6070,7 @@ describe('executeDagWorkflow -- env var injection', () => {
     const mockDeps = createMockDeps();
     const platform = createMockPlatform();
     const workflowRun = makeWorkflowRun();
+    const artifactsDir = join(testDir, 'artifacts');
 
     await executeDagWorkflow(
       mockDeps,
@@ -6060,7 +6081,7 @@ describe('executeDagWorkflow -- env var injection', () => {
       workflowRun,
       'claude',
       undefined,
-      join(testDir, 'artifacts'),
+      artifactsDir,
       join(testDir, 'logs'),
       'main',
       'docs/',
@@ -6069,13 +6090,23 @@ describe('executeDagWorkflow -- env var injection', () => {
 
     expect(mockSendQueryDag.mock.calls.length).toBeGreaterThan(0);
     const optionsArg = mockSendQueryDag.mock.calls[0][3] as Record<string, unknown>;
-    expect(optionsArg?.env).toEqual({ MY_SECRET: 'abc123' });
+    expect(optionsArg?.env).toEqual(
+      expect.objectContaining({
+        MY_SECRET: 'abc123',
+        ARTIFACTS_DIR: artifactsDir,
+        WORKFLOW_TMPDIR: join(artifactsDir, 'tmp'),
+        TMPDIR: join(artifactsDir, 'tmp'),
+        TMP: join(artifactsDir, 'tmp'),
+        TEMP: join(artifactsDir, 'tmp'),
+      })
+    );
   });
 
-  it('does not set env on claudeOptions when config.envVars is empty', async () => {
+  it('sets workflow scratch env on provider nodes even when config.envVars is empty', async () => {
     const mockDeps = createMockDeps();
     const platform = createMockPlatform();
     const workflowRun = makeWorkflowRun();
+    const artifactsDir = join(testDir, 'artifacts');
 
     await executeDagWorkflow(
       mockDeps,
@@ -6086,7 +6117,7 @@ describe('executeDagWorkflow -- env var injection', () => {
       workflowRun,
       'claude',
       undefined,
-      join(testDir, 'artifacts'),
+      artifactsDir,
       join(testDir, 'logs'),
       'main',
       'docs/',
@@ -6095,7 +6126,15 @@ describe('executeDagWorkflow -- env var injection', () => {
 
     expect(mockSendQueryDag.mock.calls.length).toBeGreaterThan(0);
     const optionsArg = mockSendQueryDag.mock.calls[0]?.[3] as Record<string, unknown> | undefined;
-    expect(optionsArg?.env).toBeUndefined();
+    expect(optionsArg?.env).toEqual(
+      expect.objectContaining({
+        ARTIFACTS_DIR: artifactsDir,
+        WORKFLOW_TMPDIR: join(artifactsDir, 'tmp'),
+        TMPDIR: join(artifactsDir, 'tmp'),
+        TMP: join(artifactsDir, 'tmp'),
+        TEMP: join(artifactsDir, 'tmp'),
+      })
+    );
   });
 });
 
@@ -7098,7 +7137,13 @@ describe('executeDagWorkflow -- script nodes', () => {
       'bun',
       ['--no-env-file', '-e', 'console.log("ok")'],
       expect.objectContaining({
-        env: expect.objectContaining({ MY_SECRET: 'abc123' }),
+        env: expect.objectContaining({
+          MY_SECRET: 'abc123',
+          TMPDIR: join(testDir, 'artifacts', 'tmp'),
+          TMP: join(testDir, 'artifacts', 'tmp'),
+          TEMP: join(testDir, 'artifacts', 'tmp'),
+          WORKFLOW_TMPDIR: join(testDir, 'artifacts', 'tmp'),
+        }),
       })
     );
     execSpy.mockRestore();

@@ -5,7 +5,7 @@
  * Independent nodes within the same layer run concurrently via Promise.allSettled.
  * Captures all assistant output regardless of streaming mode for $node_id.output substitution.
  */
-import { readFile } from 'fs/promises';
+import { mkdir, readFile } from 'fs/promises';
 import { realpathSync } from 'fs';
 import {
   basename as basenamePath,
@@ -425,6 +425,29 @@ function getWorkflowAllowedToolRoots(cwd: string, artifactsDir: string, logDir: 
   // that parent. This still does not grant access to the source checkout.
   roots.push(dirnamePath(artifactsDir), dirnamePath(logDir));
   return [...new Set(roots.map(root => resolvePath(root)))];
+}
+
+function getWorkflowScratchDir(artifactsDir: string): string {
+  return resolvePath(artifactsDir, 'tmp');
+}
+
+function buildWorkflowRuntimeEnv(
+  artifactsDir: string,
+  logDir: string,
+  baseBranch: string,
+  envVars?: Record<string, string>
+): Record<string, string> {
+  const scratchDir = getWorkflowScratchDir(artifactsDir);
+  return {
+    ...(envVars ?? {}),
+    ARTIFACTS_DIR: artifactsDir,
+    LOG_DIR: logDir,
+    BASE_BRANCH: baseBranch,
+    WORKFLOW_TMPDIR: scratchDir,
+    TMPDIR: scratchDir,
+    TMP: scratchDir,
+    TEMP: scratchDir,
+  };
 }
 
 function isHumanInputTool(toolName: string): boolean {
@@ -1114,6 +1137,7 @@ async function executeNodeInternal(
   const shouldForkSession = resumeSessionId !== undefined;
   const nodeOptionsWithAbort: SendQueryOptions | undefined = {
     ...nodeOptions,
+    env: buildWorkflowRuntimeEnv(artifactsDir, logDir, baseBranch, nodeOptions?.env),
     abortSignal: nodeAbortController.signal,
     ...(shouldForkSession ? { forkSession: true } : {}),
   };
@@ -1914,10 +1938,7 @@ async function executeBashNode(
   const timeout = node.timeout ?? SUBPROCESS_DEFAULT_TIMEOUT;
   const subprocessEnv: NodeJS.ProcessEnv = {
     ...process.env,
-    ARTIFACTS_DIR: artifactsDir,
-    LOG_DIR: logDir,
-    BASE_BRANCH: baseBranch,
-    ...(envVars ?? {}),
+    ...buildWorkflowRuntimeEnv(artifactsDir, logDir, baseBranch, envVars),
   };
 
   try {
@@ -2079,8 +2100,10 @@ async function executeScriptNode(
   const finalScript = substituteNodeOutputRefs(substitutedScript, nodeOutputs, false);
 
   const timeout = node.timeout ?? SUBPROCESS_DEFAULT_TIMEOUT;
-  const subprocessEnv =
-    envVars && Object.keys(envVars).length > 0 ? { ...process.env, ...envVars } : undefined;
+  const subprocessEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...buildWorkflowRuntimeEnv(artifactsDir, logDir, baseBranch, envVars),
+  };
 
   // Build the command and args based on runtime and inline vs named
   let cmd = '';
@@ -2458,6 +2481,7 @@ async function executeLoopNode(
 
       const iterationOptions: SendQueryOptions | undefined = {
         ...resolvedOptions,
+        env: buildWorkflowRuntimeEnv(artifactsDir, logDir, baseBranch, resolvedOptions.env),
         abortSignal: iterationAbortController.signal,
       };
 
@@ -3162,6 +3186,8 @@ export async function executeDagWorkflow(
     betas: workflow.betas,
     sandbox: workflow.sandbox,
   };
+  const workflowScratchDir = getWorkflowScratchDir(artifactsDir);
+  await mkdir(workflowScratchDir, { recursive: true });
   const layers = buildTopologicalLayers(workflow.nodes);
   const nodeOutputs = new Map<string, NodeOutput>();
 
