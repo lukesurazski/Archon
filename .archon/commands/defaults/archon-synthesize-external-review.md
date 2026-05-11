@@ -75,7 +75,7 @@ Discard items that aren't actionable. **For each filter, the rule is followed by
 The reviewer is not asking for changes.
 
 ### 2.2 Drop reviews and inline comments authored by Archon itself
-Inspect `user.login`. Skip anything whose login matches the configured bot mention (default `archon`, case-insensitive) OR whose comment body contains the bot-response marker `<!-- archon-bot-response -->`. Reason: prevents loops where Archon reacts to its own status comments.
+Inspect `user.login`. Normalize both values before compare (trim, lowercase, strip leading `@` from the configured mention). Skip anything whose normalized login matches the normalized configured bot mention (default `archon`) OR whose comment body contains the bot-response marker `<!-- archon-bot-response -->`. Reason: prevents loops where Archon reacts to its own status comments (and avoids missing matches when config uses `@archon` while GitHub login is `archon`).
 
 ### 2.3 Drop inline comments inside resolved or outdated threads
 Build a set of resolved/outdated comment `databaseId`s from `review-threads.json` (any thread where `isResolved == true` OR `isOutdated == true` - collect every `comments.nodes[].databaseId`). Then drop any inline comment whose `id` is in that set. Reason: humans already marked these handled or the diff moved past them.

@@ -2536,6 +2536,83 @@ describe('executeDagWorkflow -- provider tool safety', () => {
     });
   });
 
+  describe('shell variable allowlist bypass', () => {
+    // Bash expands `$HOME`, `${TMPDIR}`, etc. before the kernel sees the path.
+    // Without explicit expansion, the literal `$HOME/foo` token resolves under
+    // `cwd` as `<cwd>/$HOME/foo`, which is lexically inside cwd and would pass
+    // the allowlist — but the real write lands under the user's home
+    // directory. These tests pin the fail-closed behavior on both the read
+    // (`cat`) and write (`tee`) branches of the path-extraction code.
+    let savedHome: string | undefined;
+    let savedTmpdir: string | undefined;
+
+    beforeEach(() => {
+      savedHome = process.env.HOME;
+      savedTmpdir = process.env.TMPDIR;
+    });
+
+    afterEach(() => {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+      if (savedTmpdir === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = savedTmpdir;
+    });
+
+    it('blocks read commands targeting $HOME/... outside the allowlist', () => {
+      process.env.HOME = '/Users/test-home';
+      const result = getDisallowedToolPath('Bash', { command: 'cat $HOME/.ssh/id_rsa' }, testDir);
+      expect(result).toBe('/Users/test-home/.ssh/id_rsa');
+    });
+
+    it('blocks write commands targeting ${TMPDIR}/... outside the allowlist', () => {
+      process.env.TMPDIR = '/private/var/folders/test-tmp';
+      const result = getDisallowedToolPath('Bash', { command: 'tee ${TMPDIR}/exfil.txt' }, testDir);
+      expect(result).toBe('/private/var/folders/test-tmp/exfil.txt');
+    });
+
+    it('allows ${TMPDIR}/... when the resolved path is in allowedRoots', () => {
+      const allowedTmp = join(tmpdir(), `archon-shellvar-allow-${Date.now()}`);
+      process.env.TMPDIR = allowedTmp;
+      const result = getDisallowedToolPath(
+        'Bash',
+        { command: 'tee $TMPDIR/scratch.txt' },
+        testDir,
+        [allowedTmp]
+      );
+      expect(result).toBeNull();
+    });
+
+    it('rejects unknown $VAR prefixes with a sentinel path', () => {
+      // `$FOO` is not in the allowlisted-expand set, so the token collapses
+      // to a sentinel absolute path that cannot pass any reasonable
+      // workflow allowlist. Without this, `<cwd>/$FOO/bar` would be lexically
+      // inside cwd and bypass the check.
+      const result = getDisallowedToolPath('Bash', { command: 'cat $UNKNOWN_VAR/secret' }, testDir);
+      expect(result).not.toBeNull();
+      expect(result).toContain('__archon_unresolved_shell_var__');
+    });
+
+    it('rejects shell variables that look unset at runtime', () => {
+      delete process.env.HOME;
+      const result = getDisallowedToolPath('Bash', { command: 'cat $HOME/notes.txt' }, testDir);
+      expect(result).not.toBeNull();
+      expect(result).toContain('__archon_unresolved_shell_var__');
+    });
+
+    it('does NOT expand identifiers that lack a path separator', () => {
+      // `$HOMEDIR` (no slash) is a different identifier; do not treat it as a
+      // `$HOME` prefix. Without this guard we would wrongly poison legitimate
+      // tokens like `$HOMEDIRECTORY`.
+      process.env.HOME = '/Users/test-home';
+      const result = getDisallowedToolPath(
+        'Bash',
+        { command: `cat ${join(testDir, 'src.ts')}` },
+        testDir
+      );
+      expect(result).toBeNull();
+    });
+  });
+
   it('does NOT retry safety violations even when retry.onError = all', async () => {
     // Safety errors carry a structured `nonRetryable: true` flag in
     // NodeOutput (set by the WorkflowNonRetryableError class). This guard

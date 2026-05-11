@@ -186,18 +186,27 @@ function canonicalizePath(path: string): string {
   try {
     return realpathSync(resolved);
   } catch {
-    // Final component may not exist yet (about-to-be-written file). Resolve
-    // the closest existing ancestor so comparisons stay consistent across
-    // platform symlinks (e.g. macOS's `/var -> /private/var`).
-    const parent = dirnamePath(resolved);
-    if (parent !== resolved) {
+    // Final component may not exist yet (about-to-be-written file). Walk up
+    // until we find an existing ancestor and append the unresolved suffix
+    // back on. Otherwise a symlinked ancestor (e.g. `safe-link -> /etc`) one
+    // level above a still-missing target would silently fall back to the
+    // lexical path and let isPathInsideRoot() trust an out-of-allowlist
+    // location.
+    const suffix: string[] = [];
+    let current = resolved;
+    while (true) {
+      const parent = dirnamePath(current);
+      if (parent === current) break;
+      suffix.unshift(basenamePath(current));
       try {
-        return resolvePath(realpathSync(parent), basenamePath(resolved));
+        return resolvePath(realpathSync(parent), ...suffix);
       } catch {
-        // Parent also missing; fall back to lexical.
+        current = parent;
       }
     }
-    return resolved;
+    // Fail closed: no existing ancestor could be resolved. Throwing here
+    // prevents silent allowlist broadening through a symlinked ancestor.
+    throw new Error(`canonicalizePath: no existing ancestor for ${path}`);
   }
 }
 
@@ -239,18 +248,22 @@ function extractReadShellPaths(command: string): string[] {
     for (const path of extractShellPaths(segment)) {
       paths.add(path);
     }
-    // Capture relative (`./`, `../`) and home-relative (`~/`) targets that the
-    // absolute-only scan misses. Without this, `cat ../secret` or
-    // `grep foo ~/notes.txt` would bypass the read allowlist.
+    // Capture relative (`./`, `../`), home-relative (`~/`), and shell-variable
+    // (`$HOME/...`, `${TMPDIR}/...`) targets that the absolute-only scan
+    // misses. Without this, `cat ../secret`, `grep foo ~/notes.txt`, or
+    // `cat $HOME/.ssh/id_rsa` would bypass the read allowlist.
     for (const rawToken of tokenizeShellSegment(segment)) {
       if (!rawToken || rawToken.startsWith('-')) continue;
-      const token = normalizeHomeRelative(rawToken);
+      const expanded = expandShellVarPrefix(rawToken) ?? rawToken;
+      const token = normalizeHomeRelative(expanded);
       if (shouldIgnoreShellPath(token)) continue;
       if (looksLikeShellPath(token) && !token.startsWith('/')) {
         paths.add(token);
       } else if (token !== rawToken && isAbsolute(token)) {
-        // `~/foo` expanded to an absolute path under $HOME — record so the
-        // allowlist check catches it instead of resolving relative to cwd.
+        // `~/foo`, `$HOME/foo`, or `${TMPDIR}/foo` expanded to an absolute
+        // path — record so the allowlist check catches it instead of
+        // resolving the literal token relative to cwd (which would let the
+        // lexical fallback in canonicalizePath trust `<cwd>/$HOME/foo`).
         paths.add(token);
       }
     }
@@ -318,6 +331,41 @@ function normalizeHomeRelative(path: string): string {
     return joinPath(homedir(), path.slice(2));
   }
   return path;
+}
+
+// Shell variables we expand before allowlist comparison. Bash expands `$HOME`,
+// `$TMPDIR`, etc. before the kernel sees the path, so leaving them literal in
+// the token would let the lexical-fallback check trust `<cwd>/$HOME/foo` even
+// though the actual write lands under the user's home directory.
+const EXPANDABLE_SHELL_VARS = new Set(['HOME', 'TMPDIR', 'TMP', 'TEMP']);
+
+// Sentinel absolute prefix used when a token starts with an unresolved or
+// non-allowlisted shell variable. It is guaranteed to be outside any workflow
+// allowlist so isPathInsideRoot() fails closed instead of trusting the literal
+// `$VAR` token resolved under cwd.
+const UNRESOLVED_SHELL_VAR_ROOT = '/__archon_unresolved_shell_var__';
+
+function expandShellVarPrefix(token: string): string | null {
+  // Returns the expanded path if `token` starts with a `$VAR`/`${VAR}` prefix
+  // followed by `/` or end-of-string. Allowlisted vars are expanded via
+  // process.env; everything else collapses to a sentinel absolute path that
+  // cannot pass the allowlist check. Returns null for tokens without a
+  // shell-variable prefix so callers fall back to existing handling.
+  const match = /^\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))(.*)$/.exec(token);
+  if (!match) return null;
+  const name = match[1] ?? match[2] ?? '';
+  const rest = match[3] ?? '';
+  // Only `$VAR` (no trailing chars) or `$VAR/...` represents a path with the
+  // variable as its first segment. `$VARfoo` is a different identifier and
+  // should not be expanded as a path prefix.
+  if (rest !== '' && !rest.startsWith('/')) return null;
+  if (EXPANDABLE_SHELL_VARS.has(name)) {
+    const value = process.env[name];
+    if (typeof value === 'string' && value !== '' && isAbsolute(value)) {
+      return rest === '' ? value : joinPath(value, rest.slice(1));
+    }
+  }
+  return joinPath(UNRESOLVED_SHELL_VAR_ROOT, name, rest);
 }
 
 function shouldIgnoreShellPath(path: string): boolean {
@@ -392,17 +440,20 @@ function extractMutatingShellPaths(command: string): string[] {
     for (const path of extractShellPaths(segment)) {
       paths.add(path);
     }
-    // Capture relative-path targets that the absolute-only regex misses (e.g.
-    // `rm -rf ../other-repo`, `cp foo ../../target`).
+    // Capture relative-path and shell-variable targets that the absolute-only
+    // regex misses (e.g. `rm -rf ../other-repo`, `cp foo ../../target`,
+    // `tee $HOME/.ssh/authorized_keys`).
     for (const rawToken of tokenizeShellSegment(segment)) {
       if (!rawToken || rawToken.startsWith('-')) continue;
-      const token = normalizeHomeRelative(rawToken);
+      const expanded = expandShellVarPrefix(rawToken) ?? rawToken;
+      const token = normalizeHomeRelative(expanded);
       if (shouldIgnoreShellPath(token)) continue;
       if (looksLikeShellPath(token) && !token.startsWith('/')) {
         paths.add(token);
       } else if (token !== rawToken && isAbsolute(token)) {
-        // `~/foo` expanded to an absolute path under $HOME — record so the
-        // allowlist check below catches it instead of resolving relative to cwd.
+        // `~/foo`, `$HOME/foo`, or `${TMPDIR}/foo` expanded to an absolute
+        // path — record so the allowlist check below catches it instead of
+        // resolving the literal token relative to cwd.
         paths.add(token);
       }
     }
