@@ -100,7 +100,12 @@ After filtering, group remaining items into a flat list of HIGH issues:
 3. Top-level PR comments from `pr-meta.json.comments` - include only if they look like review feedback (heuristic: contain words like "fix", "should", "need to", "remove", "change", or are from CodeRabbit/Claude). Skip pure status chatter.
 4. Deduplicate: if two reviewers raise the same issue at the same `path:line`, merge into one HIGH issue listing both sources.
 
-If after grouping there are **zero issues**, write an empty consolidated file (touch it, leave size 0) and exit. The workflow's `check-actionable` node will detect the empty file and skip the implement step.
+If after grouping there are **zero issues**, write an empty consolidated file (truncate to size 0) and exit. The workflow's `check-actionable` node will detect the empty file and skip the implement step.
+
+```bash
+# Example: truncate, do not `touch` — `touch` leaves prior content intact.
+: > "$ARTIFACTS_DIR/review/consolidated-review.md"
+```
 
 ---
 

@@ -39,7 +39,7 @@ async function createSession(conversationId: string, codebaseId: string) {
 
 **Log levels:** `fatal` > `error` > `warn` > `info` (default) > `debug` > `trace`
 
-**Never log:** API keys or tokens (mask as `token.slice(0, 8) + '...'`), user message content, PII.
+**Never log:** API keys or tokens (use full redaction like `[REDACTED]` or a one-way fingerprint such as `sha256(token)` — never raw or partial secret substrings), user message content, PII.
 
 ## Error Handling
 
@@ -127,7 +127,7 @@ curl http://localhost:3637/api/conversations/<id>/messages
 **Notes:**
 - Use the web API for manual validation — avoids running multiple platform adapters
 - Database is shared with the main checkout
-- Kill the server when done: `pkill -f "bun.*dev"` (or kill the specific port)
+- Kill the server when done: terminate by the allocated port (e.g., macOS/Linux: `lsof -ti :3637 | xargs kill`; Windows PowerShell: `Get-NetTCPConnection -LocalPort 3637 | Stop-Process -Id { $_.OwningProcess } -Force`) — avoid broad `pkill -f "bun.*dev"` patterns that can kill unrelated processes
 
 ## `.archon/config.yaml` — Assistant Defaults
 

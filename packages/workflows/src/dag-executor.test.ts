@@ -2135,9 +2135,12 @@ describe('executeDagWorkflow -- tool_called event persistence', () => {
 describe('executeDagWorkflow -- provider tool safety', () => {
   let testDir: string;
   let outsideDir: string;
-  const previousToolTimeout = process.env.ARCHON_WORKFLOW_TOOL_CALL_TIMEOUT_MS;
+  let previousToolTimeout: string | undefined;
 
   beforeEach(async () => {
+    // Capture per-test so each test save/restores the env var independently
+    // (a describe-evaluation-time capture leaks state from earlier tests).
+    previousToolTimeout = process.env.ARCHON_WORKFLOW_TOOL_CALL_TIMEOUT_MS;
     testDir = join(
       tmpdir(),
       `dag-tool-safety-${Date.now()}-${Math.random().toString(36).slice(2)}`
@@ -2303,6 +2306,9 @@ describe('executeDagWorkflow -- provider tool safety', () => {
       expect.objectContaining({ status: 'blocked' })
     );
     expect(mockStore.completeWorkflowRun).not.toHaveBeenCalled();
+    // A blocked-only run must not fail at the workflow level either — resume
+    // depends on the run staying in a recoverable state.
+    expect(mockStore.failWorkflowRun).not.toHaveBeenCalled();
 
     const events = (mockStore.createWorkflowEvent as ReturnType<typeof mock>).mock.calls.map(
       call => (call[0] as { event_type: string }).event_type
@@ -2511,6 +2517,14 @@ describe('executeDagWorkflow -- provider tool safety', () => {
       // so Bash cannot bypass the read sandbox enforced on Read/Grep/etc.
       ['ls reads outside', `ls ${blocked}`, true],
       ['cat reads outside', `cat ${blocked}`, true],
+      // Allowed cases lock the contract from the other direction: a regex that
+      // becomes over-broad and starts blocking in-workspace commands must fail
+      // here, not silently sail through with only-true assertions.
+      // Use relative-explicit paths (`./`) so they resolve under testDir at
+      // call time rather than referencing testDir here at describe-evaluation
+      // (which runs before beforeEach assigns it).
+      ['ls inside workspace', `ls ./src/file.ts`, false],
+      ['cat inside workspace', `cat ./README.md`, false],
     ];
     test.each(cases)('command "%s" → blocked=%s', (_label, command, shouldBlock) => {
       const result = getDisallowedToolPath('Bash', { command }, testDir);
@@ -2645,6 +2659,9 @@ describe('executeDagWorkflow -- provider tool safety', () => {
           {
             id: 'loop-node',
             loop: { prompt: 'do stuff', until: 'DONE', max_iterations: 1 },
+            // `on_error: 'all'` + retries > 1 proves the non-retryable contract:
+            // tool timeouts must short-circuit retries.
+            retry: { on_error: 'all', max_attempts: 3 },
           },
         ],
       },
@@ -2670,6 +2687,9 @@ describe('executeDagWorkflow -- provider tool safety', () => {
           event.data.error.includes('timed out')
       )
     ).toBe(true);
+    // Non-retryable: even with retry.on_error: 'all' + max_attempts: 3,
+    // sendQuery must run exactly once.
+    expect(mockSendQueryDag).toHaveBeenCalledTimes(1);
   });
 
   it('fails the workflow when an active provider tool exceeds the tool timeout', async () => {
@@ -2693,7 +2713,12 @@ describe('executeDagWorkflow -- provider tool safety', () => {
       platform,
       'conv-dag-tool-timeout',
       testDir,
-      { name: 'dag-tool-timeout', nodes: [node('my-cmd')] },
+      {
+        name: 'dag-tool-timeout',
+        // `on_error: 'all'` + retries > 1 proves the non-retryable contract:
+        // tool timeouts must short-circuit retries.
+        nodes: [node('my-cmd', undefined, { retry: { on_error: 'all', max_attempts: 3 } })],
+      },
       workflowRun,
       'claude',
       undefined,

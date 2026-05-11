@@ -11,6 +11,7 @@ import {
   basename as basenamePath,
   dirname as dirnamePath,
   isAbsolute,
+  join as joinPath,
   relative as relativePath,
   resolve as resolvePath,
 } from 'path';
@@ -294,6 +295,16 @@ function collectToolPaths(
   return paths;
 }
 
+function normalizeHomeRelative(path: string): string {
+  // Bash expands a leading `~/` to the user's home directory before the kernel
+  // ever sees the path. Resolve it here so allowlist checks compare against the
+  // real target rather than `<cwd>/~/foo`.
+  if (path.startsWith('~/')) {
+    return joinPath(homedir(), path.slice(2));
+  }
+  return path;
+}
+
 function shouldIgnoreShellPath(path: string): boolean {
   return (
     path === '/dev/null' ||
@@ -347,12 +358,14 @@ function extractMutatingShellPaths(command: string): string[] {
   const paths = new Set<string>();
 
   // Redirection targets are the write targets. Match absolute, relative, and
-  // home-relative paths. Do not scan heredoc bodies or piped command output.
+  // home-relative paths. Allow redirections immediately after tokens (e.g.
+  // `echo hi>../outside.txt`) — `(?<!<)` excludes the `<<` heredoc operator.
+  // Do not scan heredoc bodies or piped command output.
   const redirectionPattern =
-    /(?:^|[\s])(?:\d?>{1,2}|&>)\s*(["']?)((?:\/|\.{1,2}\/|~\/)[^\s"'|;&)<>]+)\1/g;
+    /(?<!<)(?:\d?>{1,2}|&>)\s*(["']?)((?:\/|\.{1,2}\/|~\/)[^\s"'|;&)<>]+)\1/g;
   let redirectMatch: RegExpExecArray | null;
   while ((redirectMatch = redirectionPattern.exec(command)) !== null) {
-    const path = redirectMatch[2];
+    const path = normalizeHomeRelative(redirectMatch[2]);
     if (!shouldIgnoreShellPath(path)) paths.add(path);
   }
 
@@ -366,10 +379,15 @@ function extractMutatingShellPaths(command: string): string[] {
     }
     // Capture relative-path targets that the absolute-only regex misses (e.g.
     // `rm -rf ../other-repo`, `cp foo ../../target`).
-    for (const token of tokenizeShellSegment(segment)) {
-      if (!token || token.startsWith('-')) continue;
+    for (const rawToken of tokenizeShellSegment(segment)) {
+      if (!rawToken || rawToken.startsWith('-')) continue;
+      const token = normalizeHomeRelative(rawToken);
       if (shouldIgnoreShellPath(token)) continue;
       if (looksLikeShellPath(token) && !token.startsWith('/')) {
+        paths.add(token);
+      } else if (token !== rawToken && isAbsolute(token)) {
+        // `~/foo` expanded to an absolute path under $HOME — record so the
+        // allowlist check below catches it instead of resolving relative to cwd.
         paths.add(token);
       }
     }
