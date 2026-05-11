@@ -10,6 +10,7 @@ import { z } from '@hono/zod-openapi';
 export const workflowRunStatusSchema = z.enum([
   'pending',
   'running',
+  'blocked',
   'completed',
   'failed',
   'cancelled',
@@ -38,6 +39,7 @@ export const RESUMABLE_WORKFLOW_STATUSES: readonly WorkflowRunStatus[] = [
 export const workflowStepStatusSchema = z.enum([
   'pending',
   'running',
+  'blocked',
   'completed',
   'failed',
   'skipped',
@@ -49,7 +51,14 @@ export type WorkflowStepStatus = z.infer<typeof workflowStepStatusSchema>;
 // NodeState
 // ---------------------------------------------------------------------------
 
-export const nodeStateSchema = z.enum(['pending', 'running', 'completed', 'failed', 'skipped']);
+export const nodeStateSchema = z.enum([
+  'pending',
+  'running',
+  'blocked',
+  'completed',
+  'failed',
+  'skipped',
+]);
 
 export type NodeState = z.infer<typeof nodeStateSchema>;
 
@@ -73,6 +82,13 @@ export const nodeOutputSchema = z.discriminatedUnion('state', [
     state: z.enum(['completed', 'running']),
     output: z.string(),
     sessionId: z.string().optional(),
+  }),
+  z.object({
+    state: z.literal('blocked'),
+    output: z.string(),
+    sessionId: z.string().optional(),
+    reason: z.string(),
+    question: z.string().optional(),
   }),
   z.object({
     state: z.literal('failed'),

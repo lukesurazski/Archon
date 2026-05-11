@@ -9,6 +9,7 @@ export function StatusIcon({ status }: { status: string }): React.ReactElement {
         <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-accent border-t-transparent" />
       );
     case 'paused':
+    case 'blocked':
       return <Pause className="h-3 w-3 text-warning" />;
     case 'failed':
       return <span className="text-error text-sm">&#x2717;</span>;

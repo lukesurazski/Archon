@@ -159,7 +159,11 @@ function WorkflowResultCard({
     completedCount = dagNodes.filter(n => n.status === 'completed').length;
     // Only count terminal nodes (same semantics as events fallback path)
     totalCount = dagNodes.filter(
-      n => n.status === 'completed' || n.status === 'failed' || n.status === 'skipped'
+      n =>
+        n.status === 'completed' ||
+        n.status === 'failed' ||
+        n.status === 'blocked' ||
+        n.status === 'skipped'
     ).length;
   } else {
     const events = restEvents;
@@ -167,6 +171,7 @@ function WorkflowResultCard({
       e =>
         e.event_type === 'node_completed' ||
         e.event_type === 'node_failed' ||
+        e.event_type === 'node_blocked' ||
         e.event_type === 'node_skipped'
     );
     completedCount = events.filter(e => e.event_type === 'node_completed').length;
@@ -199,6 +204,8 @@ function WorkflowResultCard({
     headerTitle = 'Workflow failed';
   } else if (status === 'cancelled') {
     headerTitle = 'Workflow cancelled';
+  } else if (status === 'blocked') {
+    headerTitle = 'Workflow waiting for input';
   } else if (status === 'completed') {
     headerTitle = 'Workflow complete';
   } else {

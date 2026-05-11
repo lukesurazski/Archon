@@ -190,7 +190,7 @@ export async function getPausedWorkflowRun(conversationId: string): Promise<Work
 /**
  * Find the workflow run currently holding the lock on `workingPath`.
  *
- * The lock is held by any row in `(running, paused)` or `pending` younger
+ * The lock is held by any row in `(running, paused, blocked)` or `pending` younger
  * than `STALE_PENDING_AGE_MS` (orphaned pre-creates beyond that window are
  * ignored — they're from crashed or resume-replaced dispatches).
  *
@@ -220,7 +220,7 @@ export async function getActiveWorkflowRunByPath(
   const params: unknown[] = [workingPath];
   const clauses: string[] = [
     'working_path = $1',
-    `(status IN ('running', 'paused') OR (status = 'pending' AND started_at > ${stalePendingCutoff}))`,
+    `(status IN ('running', 'paused', 'blocked') OR (status = 'pending' AND started_at > ${stalePendingCutoff}))`,
   ];
   if (self !== undefined) {
     params.push(self.id);
@@ -658,6 +658,7 @@ export interface DashboardRunsResult {
     cancelled: number;
     pending: number;
     paused: number;
+    blocked: number;
   };
 }
 
@@ -799,6 +800,7 @@ export async function listDashboardRuns(
       cancelled: 0,
       pending: 0,
       paused: 0,
+      blocked: 0,
     };
     for (const row of countResult.rows) {
       const n = Number(row.cnt);

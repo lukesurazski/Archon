@@ -31,13 +31,16 @@ function statusClass(status: string): string {
     status === 'running' && 'bg-primary/15 text-primary',
     status === 'completed' && 'bg-success/15 text-success',
     status === 'failed' && 'bg-destructive/15 text-destructive',
-    (status === 'pending' || status === 'paused') && 'bg-warning/15 text-warning',
+    (status === 'pending' || status === 'paused' || status === 'blocked') &&
+      'bg-warning/15 text-warning',
     status === 'cancelled' && 'bg-surface-secondary text-text-tertiary'
   );
 }
 
 function isActiveRun(status: WorkflowRunResponse['status']): boolean {
-  return status === 'running' || status === 'pending' || status === 'paused';
+  return (
+    status === 'running' || status === 'pending' || status === 'paused' || status === 'blocked'
+  );
 }
 
 function formatStartedAt(run: WorkflowRunResponse): string {
@@ -70,6 +73,7 @@ function getRunProgress(
   ).length;
   const failedNodes = nodes.filter(node => node.status === 'failed');
   const runningNode = nodes.find(node => node.status === 'running');
+  const blockedNode = nodes.find(node => node.status === 'blocked');
   const failedNode = failedNodes[0];
   const active = isActiveRun(status);
   const percent =
@@ -82,7 +86,7 @@ function getRunProgress(
           : 0;
 
   if (total > 0) {
-    const detailNode = runningNode ?? failedNode;
+    const detailNode = runningNode ?? blockedNode ?? failedNode;
     return {
       completed,
       failed: failedNodes.length,
@@ -529,7 +533,8 @@ export function TaskWorkflowRunner({ task, cwd }: TaskWorkflowRunnerProps): Reac
                             status === 'running' && 'bg-primary',
                             status === 'completed' && 'bg-success',
                             status === 'failed' && 'bg-destructive',
-                            (status === 'pending' || status === 'paused') && 'bg-warning',
+                            (status === 'pending' || status === 'paused' || status === 'blocked') &&
+                              'bg-warning',
                             status === 'cancelled' && 'bg-text-tertiary'
                           )}
                         />

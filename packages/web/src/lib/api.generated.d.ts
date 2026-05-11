@@ -2249,6 +2249,7 @@ export interface components {
       latest_run_status:
         | 'pending'
         | 'running'
+        | 'blocked'
         | 'completed'
         | 'failed'
         | 'cancelled'
@@ -2286,7 +2287,14 @@ export interface components {
       updated_at: string;
     };
     /** @enum {string} */
-    WorkflowRunStatus: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
+    WorkflowRunStatus:
+      | 'pending'
+      | 'running'
+      | 'blocked'
+      | 'completed'
+      | 'failed'
+      | 'cancelled'
+      | 'paused';
     WorkflowRun: {
       id: string;
       workflow_name: string;
@@ -2760,6 +2768,7 @@ export interface components {
         cancelled: number;
         pending: number;
         paused: number;
+        blocked: number;
       };
     };
     CancelWorkflowRunResponse: {

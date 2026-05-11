@@ -247,9 +247,13 @@ nodes:
         echo "no-actionable-feedback"
       fi
 
-  - id: bump-iteration
+  - id: implement
     depends_on: [check-actionable]
     when: "$check-actionable.output == 'actionable'"
+    command: archon-implement-review-fixes
+
+  - id: bump-iteration
+    depends_on: [implement]
     bash: |
       set -euo pipefail
       PR_NUMBER=$(cat "$ARTIFACTS_DIR/.pr-number")
@@ -259,10 +263,6 @@ nodes:
       COUNT=$(cat "$COUNT_FILE" 2>/dev/null || echo 0)
       echo $((COUNT + 1)) > "$COUNT_FILE"
       echo "iteration $((COUNT + 1)) recorded"
-
-  - id: implement
-    depends_on: [bump-iteration]
-    command: archon-implement-review-fixes
 
   - id: report-noop
     depends_on: [check-actionable]

@@ -319,6 +319,32 @@ function getWorkflowAllowedToolRoots(cwd: string, artifactsDir: string, logDir: 
   return [...new Set(roots.map(root => resolvePath(root)))];
 }
 
+function isHumanInputTool(toolName: string): boolean {
+  const normalized = toolName.toLowerCase();
+  return normalized === 'askuserquestion' || normalized === 'request_user_input';
+}
+
+function extractHumanInputQuestion(toolInput: Record<string, unknown> | undefined): string {
+  if (!toolInput) return 'The workflow is waiting for human input.';
+  const directQuestion = toolInput.question;
+  if (typeof directQuestion === 'string' && directQuestion.trim() !== '') {
+    return directQuestion.trim();
+  }
+  const questions = toolInput.questions;
+  if (Array.isArray(questions)) {
+    for (const item of questions) {
+      if (typeof item === 'string' && item.trim() !== '') return item.trim();
+      if (item && typeof item === 'object') {
+        const question = (item as Record<string, unknown>).question;
+        if (typeof question === 'string' && question.trim() !== '') return question.trim();
+      }
+    }
+  }
+  const prompt = toolInput.prompt;
+  if (typeof prompt === 'string' && prompt.trim() !== '') return prompt.trim();
+  return 'The workflow is waiting for human input.';
+}
+
 /** A failed MCP server entry parsed from the SDK message. `segment` is the
  *  original substring (e.g. `"telegram (disconnected)"`) so callers can
  *  reconstruct a filtered message without losing the status detail. */
@@ -1164,6 +1190,68 @@ async function executeNodeInternal(
               'workflow_event_persist_failed'
             );
           });
+
+        if (isHumanInputTool(msg.toolName)) {
+          const question = extractHumanInputQuestion(msg.toolInput);
+          const blockedOutput = nodeOutputText.trim() ? nodeOutputText : question;
+          const duration = Date.now() - nodeStartTime;
+          const reason = 'human_input_requested';
+
+          getLog().info(
+            { workflowRunId: workflowRun.id, nodeId: node.id, toolName: msg.toolName },
+            'dag_node_blocked_for_human_input'
+          );
+
+          await deps.store.updateWorkflowRun(workflowRun.id, {
+            status: 'blocked',
+            metadata: {
+              blocked: {
+                type: reason,
+                nodeId: node.id,
+                message: question,
+                toolName: msg.toolName,
+              },
+            },
+          });
+
+          await deps.store.createWorkflowEvent({
+            workflow_run_id: workflowRun.id,
+            event_type: 'node_blocked',
+            step_name: node.id,
+            data: {
+              reason,
+              question,
+              duration_ms: duration,
+              node_output: blockedOutput,
+            },
+          });
+
+          emitter.emit({
+            type: 'node_blocked',
+            runId: workflowRun.id,
+            nodeId: node.id,
+            nodeName: node.command ?? node.id,
+            reason,
+            question,
+          });
+
+          await safeSendMessage(platform, conversationId, `Workflow is waiting: ${question}`, {
+            workflowId: workflowRun.id,
+            nodeName: node.id,
+          });
+
+          lastNodeCancelCheck.delete(`${workflowRun.id}:${node.id}`);
+          lastNodeActivityUpdate.delete(`${workflowRun.id}:${node.id}`);
+
+          return {
+            state: 'blocked',
+            output: blockedOutput,
+            sessionId: newSessionId,
+            reason,
+            question,
+            costUsd: nodeCostUsd,
+          };
+        }
       } else if (msg.type === 'tool_result' && msg.toolName) {
         if (streamingMode === 'stream' && platform.sendStructuredEvent) {
           await platform.sendStructuredEvent(conversationId, msg);
@@ -3443,8 +3531,8 @@ export async function executeDagWorkflow(
           },
           'dag.stop_detected_between_layers'
         );
-        // Paused is intentional (approval gate) — the approval message was already sent
-        if (effectiveStatus !== 'paused') {
+        // Paused/blocked are intentional human-waiting states — their messages were already sent.
+        if (effectiveStatus !== 'paused' && effectiveStatus !== 'blocked') {
           await safeSendMessage(
             platform,
             conversationId,
@@ -3471,32 +3559,50 @@ export async function executeDagWorkflow(
    * Emitter unregister is conditional: terminal states (cancelled / deleted /
    * completed / failed) unregister to release subscription resources, but
    * `paused` keeps the emitter registered so SSE stays connected while the
-   * approval gate awaits the user — crucial for resume observability.
+   * approval gate or blocked human-input node awaits the user — crucial for
+   * resume/response observability.
    */
   async function skipIfStatusChanged(logEvent: string): Promise<boolean> {
     const status = await deps.store.getWorkflowRunStatus(workflowRun.id);
     if (status === 'running') return false;
     getLog().info({ workflowRunId: workflowRun.id, status: status ?? 'deleted' }, logEvent);
-    if (status !== 'paused') {
+    if (status !== 'paused' && status !== 'blocked') {
       getWorkflowEventEmitter().unregisterRun(workflowRun.id);
     }
     return true;
   }
 
   // Single-pass: compute node outcome counts and derive success/failure booleans
-  const nodeCounts = { completed: 0, failed: 0, skipped: 0, total: workflow.nodes.length };
+  const nodeCounts = {
+    completed: 0,
+    failed: 0,
+    skipped: 0,
+    blocked: 0,
+    total: workflow.nodes.length,
+  };
   for (const o of nodeOutputs.values()) {
     if (o.state === 'completed') nodeCounts.completed++;
     else if (o.state === 'failed') nodeCounts.failed++;
     else if (o.state === 'skipped') nodeCounts.skipped++;
+    else if (o.state === 'blocked') nodeCounts.blocked++;
   }
   const anyCompleted = nodeCounts.completed > 0;
   const anyFailed = nodeCounts.failed > 0;
+  const anyBlocked = nodeCounts.blocked > 0;
 
   getLog().info(
-    { nodeCount: workflow.nodes.length, anyCompleted, anyFailed },
+    { nodeCount: workflow.nodes.length, anyCompleted, anyFailed, anyBlocked },
     'dag_workflow_finished'
   );
+
+  if (anyBlocked) {
+    if (await skipIfStatusChanged('dag.skip_blocked_status_changed')) return;
+    await deps.store.updateWorkflowRun(workflowRun.id, {
+      status: 'blocked',
+      metadata: { node_counts: nodeCounts },
+    });
+    return;
+  }
 
   if (!anyCompleted) {
     if (await skipIfStatusChanged('dag.skip_fail_status_changed')) return;

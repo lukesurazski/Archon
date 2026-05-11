@@ -2235,6 +2235,57 @@ describe('executeDagWorkflow -- provider tool safety', () => {
     ).toBeNull();
   });
 
+  it('blocks the workflow instead of completing when the provider requests human input', async () => {
+    const mockStore = createMockStore();
+    const mockDeps = createMockDeps(mockStore);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun();
+
+    mockSendQueryDag.mockImplementation(function* () {
+      yield { type: 'assistant', content: 'I need a decision.' };
+      yield {
+        type: 'tool',
+        toolName: 'AskUserQuestion',
+        toolInput: { questions: [{ question: 'Should I proceed?' }] },
+      };
+      yield { type: 'result', sessionId: 'should-not-complete' };
+    });
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag',
+      testDir,
+      { name: 'human-input-workflow', nodes: [{ id: 'ask', prompt: 'Ask if blocked' }] },
+      workflowRun,
+      'claude',
+      'sonnet',
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs',
+      {
+        assistant: 'claude',
+        commands: {},
+        defaults: { loadDefaultCommands: false, loadDefaultWorkflows: false },
+        assistants: { claude: {} },
+      }
+    );
+
+    expect(mockStore.updateWorkflowRun).toHaveBeenCalledWith(
+      workflowRun.id,
+      expect.objectContaining({ status: 'blocked' })
+    );
+    expect(mockStore.completeWorkflowRun).not.toHaveBeenCalled();
+
+    const events = (mockStore.createWorkflowEvent as ReturnType<typeof mock>).mock.calls.map(
+      call => (call[0] as { event_type: string }).event_type
+    );
+    expect(events).toContain('tool_called');
+    expect(events).toContain('node_blocked');
+    expect(events).not.toContain('node_completed');
+  });
+
   it('fails the workflow when a provider tool targets outside the working path', async () => {
     const mockStore = createMockStore();
     const mockDeps = createMockDeps(mockStore);

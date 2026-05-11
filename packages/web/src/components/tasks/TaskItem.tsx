@@ -54,7 +54,9 @@ export function TaskItem({
               task.latest_run_status === 'running' && 'animate-pulse bg-primary',
               task.latest_run_status === 'completed' && 'bg-success',
               task.latest_run_status === 'failed' && 'bg-destructive',
-              (task.latest_run_status === 'pending' || task.latest_run_status === 'paused') &&
+              (task.latest_run_status === 'pending' ||
+                task.latest_run_status === 'paused' ||
+                task.latest_run_status === 'blocked') &&
                 'bg-warning',
               (!task.latest_run_status || task.latest_run_status === 'cancelled') &&
                 'bg-text-tertiary'
@@ -90,7 +92,9 @@ export function TaskItem({
               task.latest_run_status === 'running' && 'bg-primary/15 text-primary',
               task.latest_run_status === 'completed' && 'bg-success/15 text-success',
               task.latest_run_status === 'failed' && 'bg-destructive/15 text-destructive',
-              (task.latest_run_status === 'pending' || task.latest_run_status === 'paused') &&
+              (task.latest_run_status === 'pending' ||
+                task.latest_run_status === 'paused' ||
+                task.latest_run_status === 'blocked') &&
                 'bg-warning/15 text-warning',
               (!task.latest_run_status || task.latest_run_status === 'cancelled') &&
                 'bg-surface-secondary text-text-tertiary'

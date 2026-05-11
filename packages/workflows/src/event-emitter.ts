@@ -109,6 +109,15 @@ interface NodeFailedEvent {
   error: string;
 }
 
+interface NodeBlockedEvent {
+  type: 'node_blocked';
+  runId: string;
+  nodeId: string;
+  nodeName: string;
+  reason: string;
+  question?: string;
+}
+
 interface NodeSkippedEvent {
   type: 'node_skipped';
   runId: string;
@@ -156,6 +165,7 @@ export type WorkflowEmitterEvent =
   | NodeStartedEvent
   | NodeCompletedEvent
   | NodeFailedEvent
+  | NodeBlockedEvent
   | NodeSkippedEvent
   | WorkflowArtifactEvent
   | ToolStartedEvent

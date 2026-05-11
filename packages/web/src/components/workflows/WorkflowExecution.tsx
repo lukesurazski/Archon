@@ -59,6 +59,7 @@ function StatusBadge({ status }: { status: string }): React.ReactElement {
   const colors: Record<string, string> = {
     pending: 'bg-accent/20 text-accent',
     running: 'bg-accent/20 text-accent',
+    blocked: 'bg-warning/20 text-warning',
     completed: 'bg-success/20 text-success',
     failed: 'bg-error/20 text-error',
     cancelled: 'bg-surface text-text-secondary',
@@ -125,7 +126,9 @@ export function WorkflowExecution({ runId }: WorkflowExecutionProps): React.Reac
                     ? 'completed'
                     : e.event_type === 'node_failed'
                       ? 'failed'
-                      : 'skipped';
+                      : e.event_type === 'node_blocked'
+                        ? 'blocked'
+                        : 'skipped';
               const existing = nodeMap.get(nodeId);
               // Keep the latest non-running status (completed/failed/skipped override running)
               if (!existing || status !== 'running') {
@@ -136,7 +139,7 @@ export function WorkflowExecution({ runId }: WorkflowExecutionProps): React.Reac
                   status: status as WorkflowStepStatus,
                   duration: e.data.duration_ms as number | undefined,
                   error: e.data.error as string | undefined,
-                  reason: e.data.reason as 'when_condition' | 'trigger_rule' | undefined,
+                  reason: e.data.reason as string | undefined,
                   ...(e.data.provider_id !== undefined
                     ? { providerId: e.data.provider_id as string | undefined }
                     : {}),
@@ -421,6 +424,7 @@ export function WorkflowExecution({ runId }: WorkflowExecutionProps): React.Reac
       if (
         e.event_type === 'node_completed' ||
         e.event_type === 'node_failed' ||
+        e.event_type === 'node_blocked' ||
         e.event_type === 'node_skipped'
       ) {
         completedNodes.add(nodeId);
@@ -479,6 +483,8 @@ export function WorkflowExecution({ runId }: WorkflowExecutionProps): React.Reac
           return `[${ts}] Node completed: ${e.step_name ?? 'node'}`;
         case 'node_failed':
           return `[${ts}] Node failed: ${e.step_name ?? 'node'}: ${(e.data.error as string | undefined) ?? 'Unknown error'}`;
+        case 'node_blocked':
+          return `[${ts}] Node blocked: ${e.step_name ?? 'node'}: ${(e.data.question as string | undefined) ?? (e.data.reason as string | undefined) ?? 'Waiting for input'}`;
         case 'node_skipped':
           return `[${ts}] Node skipped: ${e.step_name ?? 'node'}`;
         default:

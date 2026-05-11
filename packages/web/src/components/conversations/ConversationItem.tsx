@@ -159,6 +159,8 @@ export function ConversationItem({
         return 'Failed';
       case 'cancelled':
         return 'Cancelled';
+      case 'blocked':
+        return 'Blocked';
       case 'paused':
         return 'Paused';
       case 'pending':
@@ -182,7 +184,10 @@ export function ConversationItem({
           effectiveStatus === 'running' && 'bg-primary animate-pulse',
           effectiveStatus === 'completed' && 'bg-success',
           effectiveStatus === 'failed' && 'bg-destructive',
-          (effectiveStatus === 'pending' || effectiveStatus === 'paused') && 'bg-warning',
+          (effectiveStatus === 'pending' ||
+            effectiveStatus === 'paused' ||
+            effectiveStatus === 'blocked') &&
+            'bg-warning',
           (effectiveStatus === 'idle' || effectiveStatus === 'cancelled') && 'bg-text-tertiary'
         )}
       />
@@ -222,7 +227,9 @@ export function ConversationItem({
                   effectiveStatus === 'running' && 'bg-primary/15 text-primary',
                   effectiveStatus === 'completed' && 'bg-success/15 text-success',
                   effectiveStatus === 'failed' && 'bg-destructive/15 text-destructive',
-                  (effectiveStatus === 'pending' || effectiveStatus === 'paused') &&
+                  (effectiveStatus === 'pending' ||
+                    effectiveStatus === 'paused' ||
+                    effectiveStatus === 'blocked') &&
                     'bg-warning/15 text-warning',
                   effectiveStatus === 'cancelled' && 'bg-surface-secondary text-text-tertiary'
                 )}

@@ -2057,6 +2057,7 @@ export function registerApiRoutes(
       const dashboardValidStatuses = [
         'pending',
         'running',
+        'blocked',
         'completed',
         'failed',
         'cancelled',
@@ -2100,7 +2101,12 @@ export function registerApiRoutes(
       if (!run) {
         return apiError(c, 404, 'Workflow run not found');
       }
-      if (run.status !== 'running' && run.status !== 'pending' && run.status !== 'paused') {
+      if (
+        run.status !== 'running' &&
+        run.status !== 'pending' &&
+        run.status !== 'paused' &&
+        run.status !== 'blocked'
+      ) {
         return apiError(c, 400, `Cannot cancel workflow in '${run.status}' status`);
       }
       await workflowDb.cancelWorkflowRun(runId);
@@ -2312,6 +2318,7 @@ export function registerApiRoutes(
       const validStatuses = [
         'pending',
         'running',
+        'blocked',
         'completed',
         'failed',
         'cancelled',

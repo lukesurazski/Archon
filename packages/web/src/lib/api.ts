@@ -407,6 +407,7 @@ export interface DashboardCounts {
   cancelled: number;
   pending: number;
   paused: number;
+  blocked: number;
 }
 
 /** Paginated dashboard runs response. */

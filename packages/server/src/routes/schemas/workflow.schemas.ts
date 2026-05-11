@@ -91,7 +91,7 @@ export const commandListResponseSchema = z
 
 /** Workflow run status values. */
 export const workflowRunStatusSchema = z
-  .enum(['pending', 'running', 'completed', 'failed', 'cancelled', 'paused'])
+  .enum(['pending', 'running', 'blocked', 'completed', 'failed', 'cancelled', 'paused'])
   .openapi('WorkflowRunStatus');
 
 /** A workflow run record. */
@@ -196,6 +196,7 @@ export const dashboardRunsResponseSchema = z
       cancelled: z.number(),
       pending: z.number(),
       paused: z.number(),
+      blocked: z.number(),
     }),
   })
   .openapi('DashboardRunsResponse');

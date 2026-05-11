@@ -55,6 +55,7 @@ export function WorkflowProgressCard({
   const totalNodes = dagNodes.length;
   const isRunning = status === 'running' || status === 'pending';
   const isPaused = status === 'paused';
+  const isBlocked = status === 'blocked';
 
   // Expand/collapse state
   const [expanded, setExpanded] = useState(false);
@@ -63,12 +64,12 @@ export function WorkflowProgressCard({
   // Auto-expand when running or paused, auto-collapse when terminal (unless user toggled)
   useEffect(() => {
     if (userToggled.current) return;
-    if (isRunning || isPaused) {
+    if (isRunning || isPaused || isBlocked) {
       setExpanded(true);
     } else if (isTerminalStatus(status)) {
       setExpanded(false);
     }
-  }, [isRunning, isPaused, status]);
+  }, [isRunning, isPaused, isBlocked, status]);
 
   // Live elapsed timer
   const [elapsed, setElapsed] = useState(0);
@@ -143,7 +144,7 @@ export function WorkflowProgressCard({
       className={cn(
         'rounded-lg border border-border bg-surface transition-colors max-w-md overflow-hidden',
         isRunning && 'border-l-2 border-l-primary',
-        isPaused && 'border-l-2 border-l-warning'
+        (isPaused || isBlocked) && 'border-l-2 border-l-warning'
       )}
     >
       {/* Header bar - always visible, clickable */}
@@ -256,6 +257,17 @@ export function WorkflowProgressCard({
                     : 'Action failed — please try again'}
                 </p>
               )}
+            </div>
+          )}
+
+          {isBlocked && (
+            <div className="border-t border-border px-3 py-2">
+              <div className="flex items-start gap-2 rounded-md border border-warning/20 bg-warning/5 px-3 py-2">
+                <Pause className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
+                <p className="text-xs text-text-secondary">
+                  Waiting for human input. Open the full run for details.
+                </p>
+              </div>
             </div>
           )}
 
