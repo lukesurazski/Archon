@@ -2740,6 +2740,61 @@ describe('executeDagWorkflow -- provider tool safety', () => {
     ).toBe(true);
     expect(mockSendQueryDag).toHaveBeenCalledTimes(1);
   });
+
+  it('fails the workflow when provider node processing stalls after a tool call', async () => {
+    process.env.ARCHON_WORKFLOW_TOOL_CALL_TIMEOUT_MS = '25';
+    const mockStore = createMockStore();
+    const mockDeps = createMockDeps(mockStore);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('dag-tool-watchdog-run');
+
+    (platform.getStreamingMode as Mock<() => 'stream' | 'batch'>).mockImplementation(
+      () => 'stream'
+    );
+    const sendStructuredEvent = platform.sendStructuredEvent as Mock<
+      NonNullable<IWorkflowPlatform['sendStructuredEvent']>
+    >;
+    sendStructuredEvent.mockImplementation(() => new Promise<void>(() => {}));
+
+    mockSendQueryDag.mockImplementation(async function* () {
+      yield {
+        type: 'tool',
+        toolName: 'Edit',
+        toolInput: { file_path: join(testDir, 'src.ts') },
+      };
+      yield { type: 'result', sessionId: 'session-after-tool' };
+    });
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag-tool-watchdog',
+      testDir,
+      {
+        name: 'dag-tool-watchdog',
+        nodes: [node('my-cmd')],
+      },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    const nodeFailedEvents = (mockStore.createWorkflowEvent as ReturnType<typeof mock>).mock.calls
+      .map((call: unknown[]) => call[0] as { event_type: string; data?: { error?: string } })
+      .filter(event => event.event_type === 'node_failed');
+    expect(
+      nodeFailedEvents.some(
+        event =>
+          event.data?.error?.includes("Tool 'Edit'") && event.data.error.includes('timed out')
+      )
+    ).toBe(true);
+    expect(mockStore.failWorkflowRun).toHaveBeenCalled();
+  });
 });
 
 describe('executeDagWorkflow -- tool_completed event emission', () => {
