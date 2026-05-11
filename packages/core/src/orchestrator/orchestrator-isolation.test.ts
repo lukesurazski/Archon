@@ -64,6 +64,11 @@ mock.module('@archon/providers', () => ({
   getAgentProvider: mock(() => null),
 }));
 
+const mockExecFileAsync = mock(() => Promise.resolve({ stdout: 'main\n', stderr: '' }));
+mock.module('@archon/git', () => ({
+  execFileAsync: mockExecFileAsync,
+}));
+
 const mockCreateWorkflowRun = mock(() => Promise.resolve({ id: 'run-1' }));
 mock.module('../workflows/store-adapter', () => ({
   createWorkflowDeps: mock(() => ({
@@ -208,6 +213,8 @@ describe('validateAndResolveIsolation', () => {
     platform = new MockPlatformAdapter();
     mockUpdateConversation.mockClear();
     mockResolve.mockClear();
+    mockExecFileAsync.mockClear();
+    mockExecFileAsync.mockResolvedValue({ stdout: 'main\n', stderr: '' });
   });
 
   test('linked_issue_reuse triggers reuse message', async () => {
@@ -246,6 +253,60 @@ describe('validateAndResolveIsolation', () => {
     );
     expect(result.status).toBe('new');
   });
+
+  test('task PR workflow uses primary checkout when task branch is already checked out', async () => {
+    const conversation = makeConversation({ task_id: 'task-1' });
+    const codebase = makeCodebase({ default_cwd: '/workspace/repo' });
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: 'feat/task-container-workspace\n',
+      stderr: '',
+    });
+
+    const result = await validateAndResolveIsolation(conversation, codebase, platform, 'conv-1', {
+      workflowType: 'pr',
+      workflowId: '4',
+      prBranch: 'feat/task-container-workspace',
+    });
+
+    expect(result).toEqual({ status: 'none', cwd: '/workspace/repo', env: null });
+    expect(mockResolve).not.toHaveBeenCalled();
+    expect(mockUpdateConversation).toHaveBeenCalledWith('conv-1', {
+      cwd: '/workspace/repo',
+      isolation_env_id: null,
+    });
+  });
+
+  test('task PR workflow falls back to resolver when primary checkout is on another branch', async () => {
+    const conversation = makeConversation({ task_id: 'task-1' });
+    const codebase = makeCodebase({ default_cwd: '/workspace/repo' });
+    mockExecFileAsync.mockResolvedValueOnce({ stdout: 'main\n', stderr: '' });
+    mockResolve.mockResolvedValueOnce({
+      status: 'resolved',
+      env: makeEnvRow({
+        working_path: '/worktrees/feat-task-container-workspace',
+        branch_name: 'feat/task-container-workspace',
+      }),
+      cwd: '/worktrees/feat-task-container-workspace',
+      method: { type: 'branch_adoption', branch: 'feat/task-container-workspace' },
+    });
+
+    const result = await validateAndResolveIsolation(conversation, codebase, platform, 'conv-1', {
+      workflowType: 'pr',
+      workflowId: '4',
+      prBranch: 'feat/task-container-workspace',
+    });
+
+    expect(result.status).toBe('new');
+    expect(mockResolve).toHaveBeenCalledWith(
+      expect.objectContaining({
+        hints: expect.objectContaining({
+          workflowType: 'pr',
+          workflowId: '4',
+          prBranch: 'feat/task-container-workspace',
+        }),
+      })
+    );
+  });
 });
 
 describe('dispatchBackgroundWorkflow', () => {
@@ -260,6 +321,8 @@ describe('dispatchBackgroundWorkflow', () => {
     mockGetCodebase.mockClear();
     mockCreateWorkflowRun.mockClear();
     mockResolve.mockClear();
+    mockExecFileAsync.mockClear();
+    mockExecFileAsync.mockResolvedValue({ stdout: 'main\n', stderr: '' });
 
     mockGetOrCreateConversation.mockResolvedValue(makeConversation({ id: 'worker-conv-1' }));
     mockGetConversationById.mockResolvedValue(

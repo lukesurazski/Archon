@@ -39,6 +39,7 @@ import {
 } from '../types';
 import type { WorkflowExecutionOptions } from '../types';
 import type { IsolationHints, IsolationEnvironmentRow } from '@archon/isolation';
+import { execFileAsync } from '@archon/git';
 import {
   IsolationBlockedError,
   IsolationResolver,
@@ -64,6 +65,34 @@ type IsolationResolution =
   | { status: 'existing'; cwd: string; env: IsolationEnvironmentRow }
   | { status: 'new'; cwd: string; env: IsolationEnvironmentRow }
   | { status: 'none'; cwd: string; env: null };
+
+async function getCheckedOutBranch(repoPath: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['-C', repoPath, 'rev-parse', '--abbrev-ref', 'HEAD'],
+      { timeout: 3000 }
+    );
+    const branch = stdout.trim();
+    return branch && branch !== 'HEAD' ? branch : null;
+  } catch (error) {
+    getLog().warn(
+      { err: toError(error), repoPath },
+      'task_primary_checkout_branch_detection_failed'
+    );
+    return null;
+  }
+}
+
+async function shouldUseTaskPrimaryCheckout(
+  conversation: Conversation,
+  codebase: Codebase,
+  hints?: IsolationHints
+): Promise<boolean> {
+  if (!conversation.task_id || hints?.workflowType !== 'pr' || !hints.prBranch) return false;
+  const currentBranch = await getCheckedOutBranch(codebase.default_cwd);
+  return currentBranch === hints.prBranch;
+}
 
 // Lazy resolver singleton
 let resolver: IsolationResolver | null = null;
@@ -115,6 +144,14 @@ export async function validateAndResolveIsolation(
   hints?: IsolationHints,
   _isRetry = false
 ): Promise<IsolationResolution> {
+  if (codebase && (await shouldUseTaskPrimaryCheckout(conversation, codebase, hints))) {
+    await db.updateConversation(conversation.id, {
+      cwd: codebase.default_cwd,
+      isolation_env_id: null,
+    });
+    return { status: 'none', cwd: codebase.default_cwd, env: null };
+  }
+
   const result = await getResolver().resolve({
     existingEnvId: conversation.isolation_env_id,
     codebase: codebase
