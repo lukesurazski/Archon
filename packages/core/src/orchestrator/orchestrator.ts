@@ -46,6 +46,7 @@ import {
   getIsolationProvider,
 } from '@archon/isolation';
 import * as db from '../db/conversations';
+import * as taskDb from '../db/tasks';
 import { createIsolationStore } from '../db/isolation-environments';
 import { toError } from '../utils/error';
 import { getCodebase } from '../db/codebases';
@@ -253,6 +254,54 @@ export interface WorkflowRoutingContext {
   readonly workflowExecution?: WorkflowExecutionOptions;
 }
 
+function parsePrNumber(value: string | number | null | undefined): number | undefined {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) return value;
+  if (typeof value !== 'string') return undefined;
+  const match = /(?:\/pull\/|^)(\d+)(?:\D|$)/.exec(value.trim());
+  if (!match) return undefined;
+  const parsed = Number(match[1]);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function shouldDeriveTaskIsolationHints(hints?: IsolationHints): boolean {
+  return !hints?.workflowType || hints.workflowType === 'thread' || hints.workflowType === 'task';
+}
+
+/**
+ * Workflows launched from a task should operate on the task's branch/PR, not on
+ * a synthetic conversation thread branch. This is especially important for PR
+ * feedback workflows that apply and push fixes back to the PR head branch.
+ */
+export async function deriveTaskIsolationHints(
+  conversation: Pick<Conversation, 'task_id'>,
+  currentHints?: IsolationHints
+): Promise<IsolationHints | undefined> {
+  if (!conversation.task_id || !shouldDeriveTaskIsolationHints(currentHints)) {
+    return currentHints;
+  }
+
+  const task = await taskDb.getTask(conversation.task_id);
+  if (!task?.branch_name) return currentHints;
+
+  const prNumber = task.pr_number ?? parsePrNumber(task.pr_url);
+  if (prNumber || task.pr_url) {
+    return {
+      ...currentHints,
+      workflowType: 'pr',
+      workflowId: String(prNumber ?? conversation.task_id),
+      prBranch: task.branch_name as NonNullable<IsolationHints['prBranch']>,
+      linkedPRs: prNumber ? [prNumber] : currentHints?.linkedPRs,
+    };
+  }
+
+  return {
+    ...currentHints,
+    workflowType: 'task',
+    workflowId: conversation.task_id,
+    fromBranch: task.branch_name as NonNullable<IsolationHints['fromBranch']>,
+  };
+}
+
 /**
  * Dispatch a workflow to run in a background worker conversation (web platform only).
  * Creates a hidden worker conversation, sets up event bridging from worker to parent,
@@ -279,10 +328,15 @@ export async function dispatchBackgroundWorkflow(
   // the task workspace UI; parent_conversation_id being null is the only
   // expected "no task" path.
   const parentConversation = await db.getConversationById(ctx.conversationDbId);
+  if (!parentConversation) {
+    throw new Error(
+      `Cannot dispatch workflow "${workflow.name}": parent conversation ${ctx.conversationDbId} not found`
+    );
+  }
   await db.updateConversation(workerConv.id, {
     cwd: ctx.cwd,
     codebase_id: ctx.codebaseId ?? null,
-    task_id: parentConversation?.task_id ?? null,
+    task_id: parentConversation.task_id ?? null,
     hidden: true,
   });
 
@@ -301,7 +355,10 @@ export async function dispatchBackgroundWorkflow(
       codebase,
       ctx.platform,
       workerPlatformId,
-      { workflowType: 'thread', workflowId: workerPlatformId }
+      (await deriveTaskIsolationHints(parentConversation, ctx.isolationHints)) ?? {
+        workflowType: 'thread',
+        workflowId: workerPlatformId,
+      }
     );
     workerCwd = result.cwd;
     await db.updateConversation(workerConv.id, { cwd: workerCwd }).catch((e: unknown) => {

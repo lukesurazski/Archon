@@ -132,10 +132,14 @@ const mockValidateAndResolveIsolation = mock(() =>
   Promise.resolve({ status: 'existing', cwd: '/workspace/project', env: null })
 );
 const mockDispatchBackgroundWorkflow = mock(() => Promise.resolve());
+const mockDeriveTaskIsolationHints = mock((_conversation: Conversation, hints: unknown) =>
+  Promise.resolve(hints)
+);
 
 mock.module('./orchestrator', () => ({
   validateAndResolveIsolation: mockValidateAndResolveIsolation,
   dispatchBackgroundWorkflow: mockDispatchBackgroundWorkflow,
+  deriveTaskIsolationHints: mockDeriveTaskIsolationHints,
   IsolationBlockedError: class IsolationBlockedError extends Error {
     constructor(message: string) {
       super(message);
@@ -281,6 +285,7 @@ function clearAllMocks(): void {
   mockSyncArchonToWorktree.mockClear();
   mockValidateAndResolveIsolation.mockClear();
   mockDispatchBackgroundWorkflow.mockClear();
+  mockDeriveTaskIsolationHints.mockClear();
   mockBuildOrchestratorPrompt.mockClear();
   mockBuildProjectScopedPrompt.mockClear();
   mockLoadConfig.mockClear();

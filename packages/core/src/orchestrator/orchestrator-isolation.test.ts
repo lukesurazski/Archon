@@ -33,6 +33,11 @@ mock.module('../db/codebases', () => ({
   createCodebase: mock(() => Promise.resolve({ id: 'new-codebase-id' })),
 }));
 
+const mockGetTask = mock(() => Promise.resolve(null));
+mock.module('../db/tasks', () => ({
+  getTask: mockGetTask,
+}));
+
 mock.module('../db/isolation-environments', () => ({
   createIsolationStore: mock(() => ({
     updateStatus: mock(() => Promise.resolve()),
@@ -250,14 +255,17 @@ describe('dispatchBackgroundWorkflow', () => {
     platform = new MockPlatformAdapter();
     mockGetOrCreateConversation.mockClear();
     mockGetConversationById.mockClear();
+    mockGetTask.mockClear();
     mockUpdateConversation.mockClear();
     mockGetCodebase.mockClear();
     mockCreateWorkflowRun.mockClear();
+    mockResolve.mockClear();
 
     mockGetOrCreateConversation.mockResolvedValue(makeConversation({ id: 'worker-conv-1' }));
     mockGetConversationById.mockResolvedValue(
       makeConversation({ id: 'parent-conv-1', task_id: 'task-1' })
     );
+    mockGetTask.mockResolvedValue(null);
     mockCreateWorkflowRun.mockResolvedValue({ id: 'run-1' });
   });
 
@@ -336,5 +344,53 @@ describe('dispatchBackgroundWorkflow', () => {
     // updateConversation must NOT have been called with a silently-stripped
     // task_id — the throw must short-circuit before reaching it.
     expect(mockUpdateConversation).not.toHaveBeenCalled();
+  });
+
+  test('uses task PR metadata instead of thread isolation for worker workflows', async () => {
+    mockGetCodebase.mockResolvedValueOnce(makeCodebase());
+    mockGetTask.mockResolvedValueOnce({
+      id: 'task-1',
+      branch_name: 'feat/task-container-workspace',
+      pr_url: 'https://github.com/lukesurazski/Archon/pull/4',
+      pr_number: null,
+    });
+    mockResolve.mockResolvedValueOnce({
+      status: 'resolved',
+      env: makeEnvRow({
+        workflow_type: 'pr',
+        workflow_id: '4',
+        working_path: '/workspace/feat-task-container-workspace',
+        branch_name: 'feat/task-container-workspace',
+      }),
+      cwd: '/workspace/feat-task-container-workspace',
+      method: { type: 'branch_adoption', branch: 'feat/task-container-workspace' },
+    });
+
+    await dispatchBackgroundWorkflow(
+      {
+        platform,
+        conversationId: 'parent-platform-conv',
+        conversationDbId: 'parent-conv-1',
+        cwd: '/workspace',
+        codebaseId: 'cb-1',
+        originalMessage: 'https://github.com/lukesurazski/Archon/pull/4',
+        isolationHints: { workflowType: 'thread', workflowId: 'parent-platform-conv' },
+      },
+      { name: 'archon-respond-to-pr-feedback', description: 'Respond to PR feedback', steps: [] }
+    );
+
+    expect(mockResolve).toHaveBeenCalledWith(
+      expect.objectContaining({
+        hints: expect.objectContaining({
+          workflowType: 'pr',
+          workflowId: '4',
+          prBranch: 'feat/task-container-workspace',
+          linkedPRs: [4],
+        }),
+      })
+    );
+    expect(mockUpdateConversation).toHaveBeenCalledWith('worker-conv-1', {
+      cwd: '/workspace/feat-task-container-workspace',
+    });
   });
 });
