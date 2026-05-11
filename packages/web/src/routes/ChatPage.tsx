@@ -32,7 +32,9 @@ function parseWorkspacePath(rawPath: string | undefined): {
 } {
   if (!rawPath) return {};
 
-  const parts = rawPath.split('/').filter(Boolean).map(decodeURIComponent);
+  // React Router v7's useParams() returns already-decoded values (including
+  // the splat `*` param), so we do not decode again here.
+  const parts = rawPath.split('/').filter(Boolean);
   if (parts[0] === 'tasks' && parts[1]) {
     return {
       taskId: parts[1],
@@ -40,7 +42,7 @@ function parseWorkspacePath(rawPath: string | undefined): {
     };
   }
 
-  return { conversationId: decodeURIComponent(rawPath) };
+  return { conversationId: rawPath };
 }
 
 function getInitialWidth(): number {

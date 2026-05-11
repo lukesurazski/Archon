@@ -162,7 +162,7 @@ assistants:
 ## Archon Directory Layouts
 
 **User-level (`~/.archon/`):**
-```
+```text
 ~/.archon/
 ├── workspaces/owner/repo/
 │   ├── source/                  # Cloned repo or symlink → local path
@@ -182,7 +182,7 @@ assistants:
 ```
 
 **Repo-level (`.archon/` in any repository):**
-```
+```text
 .archon/
 ├── commands/       # Custom commands
 ├── workflows/      # Workflow definitions (YAML)

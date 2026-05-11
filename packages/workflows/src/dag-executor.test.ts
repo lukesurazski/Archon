@@ -2195,9 +2195,13 @@ describe('executeDagWorkflow -- provider tool safety', () => {
         [dirname(outsideDir)]
       )
     ).toBeNull();
+    // Read-style Bash commands targeting out-of-workflow paths must be
+    // blocked just like direct Read/Write tools. Otherwise a prompt-injected
+    // agent could exfiltrate host files (e.g. `cat /etc/passwd`) through
+    // Bash even though the file tools are guarded.
     expect(
       getDisallowedToolPath('Bash', { command: `cat ${join(outsideDir, 'src.ts')}` }, testDir)
-    ).toBeNull();
+    ).toBe(join(outsideDir, 'src.ts'));
     expect(
       getDisallowedToolPath(
         'Bash',
@@ -2206,7 +2210,7 @@ describe('executeDagWorkflow -- provider tool safety', () => {
         },
         testDir
       )
-    ).toBeNull();
+    ).toBe(join(outsideDir, 'tool-results', 'result.txt'));
     const blockedBashPath = join(dirname(dirname(tmpdir())), 'archon-outside-src.ts');
     expect(
       getDisallowedToolPath('Bash', { command: `echo hi > ${blockedBashPath}` }, testDir)
@@ -2286,6 +2290,74 @@ describe('executeDagWorkflow -- provider tool safety', () => {
     expect(events).toContain('tool_called');
     expect(events).toContain('node_blocked');
     expect(events).not.toContain('node_completed');
+  });
+
+  it('marks the run failed (not blocked) when one sibling fails and another blocks', async () => {
+    // `failed` must take precedence over `blocked` at the layer level: a
+    // parallel layer with one failed node + one human-input node leaves the
+    // run in `blocked` if precedence is wrong, even though resume cannot
+    // recover the already-failed sibling. Guard against that regression.
+    const mockStore = createMockStore();
+    const mockDeps = createMockDeps(mockStore);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('dag-blocked-vs-failed-run');
+
+    mockSendQueryDag.mockImplementation(function* (prompt: string) {
+      if (prompt.includes('Ask the user')) {
+        // The "ask" node blocks on human input.
+        yield {
+          type: 'tool',
+          toolName: 'AskUserQuestion',
+          toolInput: { questions: [{ question: 'Should I proceed?' }] },
+        };
+        yield { type: 'result', sessionId: 'ask-session' };
+      } else {
+        // The sibling "edit" node fails via an out-of-workflow Edit (a
+        // non-retryable safety violation).
+        yield {
+          type: 'tool',
+          toolName: 'Edit',
+          toolInput: { file_path: join(outsideDir, 'src.ts') },
+        };
+      }
+    });
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-blocked-vs-failed',
+      testDir,
+      {
+        name: 'blocked-vs-failed-workflow',
+        nodes: [
+          { id: 'ask', prompt: 'Ask the user a question' },
+          { id: 'edit', prompt: 'Edit a file' },
+        ],
+      },
+      workflowRun,
+      'claude',
+      'sonnet',
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs',
+      minimalConfig
+    );
+
+    // The run must end via failWorkflowRun, NOT via a layer-completion
+    // updateWorkflowRun(status: 'blocked'). A node-level blocked write
+    // happens first when AskUserQuestion fires (with metadata.blocked
+    // describing the prompt), but the final layer-completion logic must
+    // override it with a failed-terminal write — otherwise resume cannot
+    // recover the already-failed sibling and the user is trapped.
+    expect(mockStore.failWorkflowRun).toHaveBeenCalled();
+    const layerBlockedCalls = (
+      mockStore.updateWorkflowRun as ReturnType<typeof mock>
+    ).mock.calls.filter((call: unknown[]) => {
+      const update = call[1] as { status?: string; metadata?: { node_counts?: unknown } };
+      return update?.status === 'blocked' && update?.metadata?.node_counts !== undefined;
+    });
+    expect(layerBlockedCalls).toHaveLength(0);
   });
 
   it('fails the workflow when a provider tool targets outside the working path', async () => {
@@ -2415,8 +2487,10 @@ describe('executeDagWorkflow -- provider tool safety', () => {
       ['heredoc redirect', `cat <<EOF > ${blocked}\nfoo\nEOF`, true],
       ['chained ;', `cd /tmp; rm ${blocked}`, true],
       ['chained &&', `cd /tmp && rm ${blocked}`, true],
-      ['ls is read-only', `ls ${blocked}`, false],
-      ['cat is read-only', `cat ${blocked}`, false],
+      // Read-style commands targeting out-of-workflow paths are blocked too,
+      // so Bash cannot bypass the read sandbox enforced on Read/Grep/etc.
+      ['ls reads outside', `ls ${blocked}`, true],
+      ['cat reads outside', `cat ${blocked}`, true],
     ];
     test.each(cases)('command "%s" → blocked=%s', (_label, command, shouldBlock) => {
       const result = getDisallowedToolPath('Bash', { command }, testDir);
@@ -3686,7 +3760,7 @@ describe('executeDagWorkflow -- resume with priorCompletedNodes', () => {
       ).mock.calls;
       expect(completeCalls.length).toBe(1);
       expect(completeCalls[0][1]).toEqual({
-        node_counts: { completed: 1, failed: 0, skipped: 0, total: 1 },
+        node_counts: { completed: 1, failed: 0, skipped: 0, blocked: 0, total: 1 },
       });
     });
 
@@ -4475,7 +4549,7 @@ describe('executeDagWorkflow -- resume with priorCompletedNodes', () => {
       ).mock.calls;
       expect(completeCalls.length).toBe(1);
       expect(completeCalls[0][1]).toEqual({
-        node_counts: { completed: 1, failed: 0, skipped: 0, total: 1 },
+        node_counts: { completed: 1, failed: 0, skipped: 0, blocked: 0, total: 1 },
       });
     });
 
@@ -6366,7 +6440,7 @@ describe('executeDagWorkflow -- cost tracking', () => {
     ).mock.calls;
     expect(completeCalls.length).toBe(1);
     expect(completeCalls[0][1]).toEqual({
-      node_counts: { completed: 1, failed: 0, skipped: 0, total: 1 },
+      node_counts: { completed: 1, failed: 0, skipped: 0, blocked: 0, total: 1 },
       total_cost_usd: 0.0042,
     });
   });

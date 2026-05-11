@@ -207,6 +207,41 @@ function isPathInsideRoot(path: string, root: string): boolean {
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
+function stripHeredocBodies(command: string): string {
+  // Strip heredoc bodies so absolute paths embedded in the body (e.g. a
+  // literal "/pr-review/scope.md" inside a doc being authored) are not
+  // misread as filesystem targets. Keep the heredoc *start* line — that
+  // line can carry a redirection target like `cat <<EOF > /blocked` which
+  // is a real filesystem write and must still be checked.
+  return command.replace(/(<<-?\s*['"]?(\w+)['"]?[^\n]*)\n[\s\S]*?\n\s*\2(\s*)(?=\n|$)/g, '$1$3');
+}
+
+// Commands that read file contents. Their absolute/relative path arguments
+// are checked against the workflow allowlist so a prompt-injected agent
+// cannot exfiltrate arbitrary host files through Bash even though the
+// direct Read tool is guarded. We deliberately exclude navigation/info
+// commands like `cd`, `pwd`, `find`, `git status` so legitimate workflows
+// that mention absolute paths in non-file-reading positions (e.g.
+// `cd /tmp; rm <target>`) still get the intended target — not the
+// `cd` argument — flagged.
+const READ_COMMAND_PATTERN =
+  /(?:^|[;&|({]\s*)(?:cat|head|tail|less|more|bat|nl|cut|paste|column|pr|grep|egrep|fgrep|rg|awk|ls|wc|file|stat|md5sum|sha1sum|sha256sum|sha512sum|xxd|od|hexdump|strings|tac|rev|sed)\b([^\n;&|]*)/g;
+
+function extractReadShellPaths(command: string): string[] {
+  const paths = new Set<string>();
+  let match: RegExpExecArray | null;
+  // Reset lastIndex defensively — the regex is module-scoped so prior calls
+  // could leave state behind.
+  READ_COMMAND_PATTERN.lastIndex = 0;
+  while ((match = READ_COMMAND_PATTERN.exec(command)) !== null) {
+    const segment = match[1] ?? '';
+    for (const path of extractShellPaths(segment)) {
+      paths.add(path);
+    }
+  }
+  return [...paths];
+}
+
 function collectToolPaths(
   toolName: string,
   toolInput: Record<string, unknown> | undefined
@@ -215,9 +250,24 @@ function collectToolPaths(
   const normalizedToolName = toolName.toLowerCase();
   if (normalizedToolName === 'bash') {
     const command = toolInput.command;
-    return typeof command === 'string' && mayMutateShellPaths(command)
-      ? extractMutatingShellPaths(command)
-      : [];
+    if (typeof command !== 'string') return [];
+    // Strip heredoc bodies before scanning so doc content doesn't masquerade
+    // as filesystem paths.
+    const stripped = stripHeredocBodies(command);
+    const paths = new Set<string>();
+    // Read-side: paths passed to known read commands (cat, head, ls, ...)
+    // get checked against the workflow allowlist.
+    for (const path of extractReadShellPaths(stripped)) {
+      paths.add(path);
+    }
+    // Write-side: redirections plus mutating commands (also catches relative
+    // targets like `rm ../foo` that the absolute-only scan misses).
+    if (mayMutateShellPaths(stripped)) {
+      for (const path of extractMutatingShellPaths(stripped)) {
+        paths.add(path);
+      }
+    }
+    return [...paths];
   }
   const pathKeysByTool: Record<string, string[]> = {
     read: ['file_path'],
@@ -3685,7 +3735,12 @@ export async function executeDagWorkflow(
     'dag_workflow_finished'
   );
 
-  if (anyBlocked) {
+  // `failed` takes precedence over `blocked`: a parallel layer with one
+  // failed node and one human-input node can no longer succeed even if the
+  // user answers the question, so marking the run `blocked` would trap them
+  // in a resumable state that resume cannot actually fix. Fall through to
+  // the `anyFailed` branch in that case.
+  if (anyBlocked && !anyFailed) {
     if (await skipIfStatusChanged('dag.skip_blocked_status_changed')) return;
     await deps.store.updateWorkflowRun(workflowRun.id, {
       status: 'blocked',
