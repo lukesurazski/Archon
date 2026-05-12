@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router';
-import { MessageSquare } from 'lucide-react';
+import { MessageSquare, PlayCircle } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { DagNodeProgress } from './DagNodeProgress';
@@ -12,7 +12,13 @@ import { ChatInterface } from '@/components/chat/ChatInterface';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable';
 import { useWorkflowStore } from '@/stores/workflow-store';
-import { getWorkflowRun, getWorkflowRunByWorker, getCodebase, getWorkflow } from '@/lib/api';
+import {
+  getWorkflowRun,
+  getWorkflowRunByWorker,
+  getCodebase,
+  getWorkflow,
+  resumeWorkflowRun,
+} from '@/lib/api';
 import { ensureUtc, formatDurationMs } from '@/lib/format';
 import { selectInitialNode } from '@/lib/select-initial-node';
 import type {
@@ -82,6 +88,10 @@ export function WorkflowExecution({ runId }: WorkflowExecutionProps): React.Reac
   const [codebaseCwd, setCodebaseCwd] = useState<string | null>(null);
   const [workerRunId, setWorkerRunId] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<'graph' | 'logs' | 'chat'>('graph');
+  const [resumeActionState, setResumeActionState] = useState<{
+    status: 'idle' | 'saving' | 'saved' | 'dispatched' | 'error';
+    message?: string;
+  }>({ status: 'idle' });
   // Increments on every user-initiated node click to trigger scroll in WorkflowLogs
   const [nodeScrollTrigger, setNodeScrollTrigger] = useState(0);
   // Track which codebaseId we've already fetched to avoid stale re-fetches during runId transitions
@@ -94,6 +104,7 @@ export function WorkflowExecution({ runId }: WorkflowExecutionProps): React.Reac
     setCodebaseCwd(null);
     setWorkerRunId(null);
     setActiveView('graph');
+    setResumeActionState({ status: 'idle' });
     setNodeScrollTrigger(0);
     fetchedCodebaseIdRef.current = null;
   }, [runId]);
@@ -349,7 +360,11 @@ export function WorkflowExecution({ runId }: WorkflowExecutionProps): React.Reac
   const workflow = ((): WorkflowState | null => {
     if (!liveWorkflow) return initialData;
     if (!initialData) return liveWorkflow;
-    if (isTerminal(initialData.status) && !isTerminal(liveWorkflow.status)) {
+    if (
+      isTerminal(initialData.status) &&
+      !isTerminal(liveWorkflow.status) &&
+      (!initialData.completedAt || liveWorkflow.startedAt <= initialData.completedAt)
+    ) {
       console.warn('[WorkflowExecution] REST overrides stale SSE status', {
         runId,
         restStatus: initialData.status,
@@ -359,7 +374,7 @@ export function WorkflowExecution({ runId }: WorkflowExecutionProps): React.Reac
     }
     // Merge: use liveWorkflow's dynamic status but preserve initialData's
     // structural data when liveWorkflow is sparse (missed earlier events).
-    return {
+    const merged = {
       ...initialData,
       status: liveWorkflow.status,
       completedAt: liveWorkflow.completedAt ?? initialData.completedAt,
@@ -372,6 +387,19 @@ export function WorkflowExecution({ runId }: WorkflowExecutionProps): React.Reac
       currentIteration: liveWorkflow.currentIteration ?? initialData.currentIteration,
       maxIterations: liveWorkflow.maxIterations ?? initialData.maxIterations,
     };
+    if (
+      resumeActionState.status === 'dispatched' &&
+      isTerminal(liveWorkflow.status) &&
+      !isTerminal(initialData.status)
+    ) {
+      return {
+        ...merged,
+        status: initialData.status,
+        completedAt: undefined,
+        error: undefined,
+      };
+    }
+    return merged;
   })();
 
   const graphDagNodes = useMemo((): readonly DagNode[] | null => {
@@ -565,6 +593,41 @@ export function WorkflowExecution({ runId }: WorkflowExecutionProps): React.Reac
   const elapsed = startedAt ? Math.max(0, completedAt - startedAt) : 0;
 
   const isRunning = workflow.status === 'running' || workflow.status === 'pending';
+  const canResumeFromCheckpoint = workflow.status === 'failed' || workflow.status === 'cancelled';
+
+  async function handleResumeFromCheckpoint(): Promise<void> {
+    try {
+      setResumeActionState({ status: 'saving' });
+      const response = await resumeWorkflowRun(runId, {
+        fromStep: selectedDagNode ?? undefined,
+      });
+      setResumeActionState({
+        status: response.dispatched ? 'dispatched' : 'saved',
+        message: response.message,
+      });
+      if (response.dispatched) {
+        queryClient.setQueryData<WorkflowRunQueryData>(['workflowRun', runId], current =>
+          current
+            ? {
+                ...current,
+                workflowState: {
+                  ...current.workflowState,
+                  status: 'pending',
+                  completedAt: undefined,
+                },
+              }
+            : current
+        );
+      } else {
+        await queryClient.invalidateQueries({ queryKey: ['workflowRun', runId] });
+      }
+    } catch (err) {
+      setResumeActionState({
+        status: 'error',
+        message: err instanceof Error ? err.message : 'Failed to prepare resume',
+      });
+    }
+  }
 
   // Pick the platform ID for logs: worker takes precedence over conversation.
   const logsPlatformId = workerPlatformId ?? conversationPlatformId;
@@ -687,6 +750,25 @@ export function WorkflowExecution({ runId }: WorkflowExecutionProps): React.Reac
         </div>
         <div className="flex items-center gap-2 ml-auto shrink-0">
           {codebaseName && <span className="text-xs text-text-secondary">{codebaseName}</span>}
+          {canResumeFromCheckpoint && (
+            <button
+              onClick={(): void => {
+                void handleResumeFromCheckpoint();
+              }}
+              disabled={resumeActionState.status === 'saving'}
+              className="flex max-w-48 items-center gap-1 rounded-md px-2 py-1 text-xs text-primary hover:bg-primary/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              title={selectedDagNode ? `Continue from ${selectedDagNode}` : 'Continue workflow'}
+            >
+              <PlayCircle className="h-3 w-3" />
+              <span className="truncate">
+                {resumeActionState.status === 'saving'
+                  ? 'Saving'
+                  : selectedDagNode
+                    ? `Continue from ${selectedDagNode}`
+                    : 'Continue'}
+              </span>
+            </button>
+          )}
           {workerRunId && (
             <button
               onClick={(): void => {
@@ -701,6 +783,15 @@ export function WorkflowExecution({ runId }: WorkflowExecutionProps): React.Reac
           <span className="text-xs text-text-secondary">{formatDurationMs(elapsed)}</span>
         </div>
       </div>
+      {resumeActionState.status !== 'idle' && resumeActionState.message && (
+        <div
+          className={`border-b border-border px-4 py-2 text-xs ${
+            resumeActionState.status === 'error' ? 'text-error' : 'text-text-secondary'
+          }`}
+        >
+          {resumeActionState.message}
+        </div>
+      )}
 
       {/* View tabs — only for DAG workflows */}
       {isDag && (

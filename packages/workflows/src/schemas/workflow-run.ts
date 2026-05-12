@@ -29,6 +29,7 @@ export const TERMINAL_WORKFLOW_STATUSES: readonly WorkflowRunStatus[] = [
 /** Statuses that allow a user to resume execution. */
 export const RESUMABLE_WORKFLOW_STATUSES: readonly WorkflowRunStatus[] = [
   'failed',
+  'cancelled',
   'paused',
 ] as const;
 

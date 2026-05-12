@@ -447,10 +447,13 @@ export async function cancelWorkflowRun(
 }
 
 export async function resumeWorkflowRun(
-  runId: string
-): Promise<{ success: boolean; message: string }> {
+  runId: string,
+  options?: { fromStep?: string }
+): Promise<{ success: boolean; message: string; dispatched?: boolean }> {
   return fetchJSON(`/api/workflows/runs/${encodeURIComponent(runId)}/resume`, {
     method: 'POST',
+    body: options?.fromStep ? JSON.stringify({ fromStep: options.fromStep }) : undefined,
+    headers: options?.fromStep ? { 'Content-Type': 'application/json' } : undefined,
   });
 }
 

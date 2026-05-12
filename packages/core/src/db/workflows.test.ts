@@ -485,7 +485,7 @@ describe('workflows database', () => {
 
       expect(result).toEqual(failedRun);
       const [query, params] = mockQuery.mock.calls[0] as [string, unknown[]];
-      expect(query).toContain("status IN ('failed', 'paused')");
+      expect(query).toContain("status IN ('failed', 'cancelled', 'paused')");
       expect(query).toContain('working_path = $2');
       expect(query).not.toContain('conversation_id');
       expect(query).toContain('ORDER BY started_at DESC');
@@ -510,6 +510,26 @@ describe('workflows database', () => {
       expect(query).toContain("status = 'running'");
       expect(query).toContain('last_activity_at');
       expect(params).toEqual(['feature-development', '/repo/path', 1]);
+    });
+
+    test('scopes resumable lookup to parent conversation when provided', async () => {
+      const cancelledRun = {
+        ...mockWorkflowRun,
+        status: 'cancelled' as const,
+        working_path: '/repo/path',
+        parent_conversation_id: 'parent-conv-1',
+      };
+      mockQuery.mockResolvedValueOnce(createQueryResult([cancelledRun]));
+
+      const result = await findResumableRun('feature-development', '/repo/path', {
+        parentConversationId: 'parent-conv-1',
+      });
+
+      expect(result).toEqual(cancelledRun);
+      const [query, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+      expect(query).toContain('parent_conversation_id = $4');
+      expect(query).toContain("status IN ('failed', 'cancelled', 'paused')");
+      expect(params).toEqual(['feature-development', '/repo/path', 1, 'parent-conv-1']);
     });
 
     test('returns a running run with null last_activity_at (never recorded activity)', async () => {
@@ -546,7 +566,7 @@ describe('workflows database', () => {
   });
 
   describe('getActiveWorkflowRunByPath', () => {
-    test('returns active or failed run for the given working path', async () => {
+    test('returns active lock-holding run for the given working path', async () => {
       const activeRun = { ...mockWorkflowRun, working_path: '/repo/path' };
       mockQuery.mockResolvedValueOnce(createQueryResult([activeRun]));
 
@@ -554,7 +574,7 @@ describe('workflows database', () => {
 
       expect(result).toEqual(activeRun);
       const [query, params] = mockQuery.mock.calls[0] as [string, unknown[]];
-      expect(query).toContain("status IN ('running', 'paused')");
+      expect(query).toContain("status IN ('running', 'paused', 'blocked')");
       expect(query).toContain('working_path = $1');
       expect(params).toEqual(['/repo/path']);
     });

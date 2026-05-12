@@ -1,9 +1,10 @@
-import { describe, test, expect, mock, beforeEach } from 'bun:test';
+import { describe, test, expect, mock, spyOn, beforeEach, afterAll } from 'bun:test';
 import { OpenAPIHono } from '@hono/zod-openapi';
 import type { ConversationLockManager } from '@archon/core';
 import type { WebAdapter } from '../adapters/web';
 import { validationErrorHook } from './openapi-defaults';
 import { mockAllWorkflowModules } from '../test/workflow-mock-factories';
+import * as workflowDiscoveryModule from '@archon/workflows/workflow-discovery';
 
 // ---------------------------------------------------------------------------
 // Mock setup — must be before dynamic imports of mocked modules
@@ -130,7 +131,26 @@ mock.module('@archon/paths', () => ({
 
 mockAllWorkflowModules();
 
+// Spy on the (factory-mocked) workflow-discovery module rather than calling
+// `mock.module()` again locally. `mock.module()` is process-global and
+// irreversible, while `spyOn().mockRestore()` is properly scoped. Other test
+// files already mock this path with their own implementations via the factory.
+const mockDiscoverWorkflowsWithConfig = spyOn(
+  workflowDiscoveryModule,
+  'discoverWorkflowsWithConfig'
+).mockImplementation(async () => ({ workflows: [], errors: [] }));
+
+afterAll(() => {
+  mockDiscoverWorkflowsWithConfig.mockRestore();
+});
+
+const mockExecFileAsync = mock(async (_cmd: string, _args: string[]) => ({
+  stdout: '',
+  stderr: '',
+}));
+
 mock.module('@archon/git', () => ({
+  execFileAsync: mockExecFileAsync,
   removeWorktree: mock(async () => {}),
   toRepoPath: (p: string) => p,
   toWorktreePath: (p: string) => p,
@@ -232,6 +252,13 @@ const MOCK_FAILED_RUN: MockWorkflowRun = {
   completed_at: NOW,
 };
 
+const MOCK_CANCELLED_RUN: MockWorkflowRun = {
+  ...MOCK_RUNNING_RUN,
+  id: 'run-uuid-5',
+  status: 'cancelled',
+  completed_at: NOW,
+};
+
 const MOCK_PENDING_RUN: MockWorkflowRun = {
   ...MOCK_RUNNING_RUN,
   id: 'run-uuid-3',
@@ -267,6 +294,23 @@ const MOCK_EVENTS: MockWorkflowEvent[] = [
     created_at: NOW,
   },
 ];
+
+function mockWorkflowDiscoveryWithInput(workflowName: string, inputType: string): void {
+  mockDiscoverWorkflowsWithConfig.mockResolvedValueOnce({
+    workflows: [
+      {
+        source: 'project',
+        workflow: {
+          name: workflowName,
+          description: 'Test workflow',
+          inputs: [{ name: 'target', type: inputType }],
+          nodes: [],
+        },
+      },
+    ],
+    errors: [],
+  });
+}
 
 const MOCK_CONV = {
   id: 'internal-uuid-123',
@@ -1052,6 +1096,12 @@ describe('GET /api/workflows/runs/by-worker/:platformId', () => {
 describe('POST /api/workflows/runs/:runId/resume', () => {
   beforeEach(() => {
     mockGetWorkflowRun.mockReset();
+    mockUpdateWorkflowRun.mockReset();
+    mockGetConversationById.mockReset();
+    mockHandleMessage.mockReset();
+    mockExecFileAsync.mockReset();
+    mockDiscoverWorkflowsWithConfig.mockReset();
+    mockDiscoverWorkflowsWithConfig.mockResolvedValue({ workflows: [], errors: [] });
   });
 
   test('returns 404 when run not found', async () => {
@@ -1084,6 +1134,137 @@ describe('POST /api/workflows/runs/:runId/resume', () => {
     const body = (await response.json()) as { success: boolean; message: string };
     expect(body.success).toBe(true);
     expect(body.message).toContain('ready to resume');
+    expect(mockUpdateWorkflowRun).toHaveBeenCalledWith('run-uuid-4', {
+      metadata: { resume_from_step: null },
+    });
+  });
+
+  test('stores requested checkpoint step for next auto-resume', async () => {
+    mockGetWorkflowRun.mockResolvedValueOnce(MOCK_CANCELLED_RUN);
+    const { app } = makeApp();
+    const response = await app.request('/api/workflows/runs/run-uuid-5/resume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fromStep: 'verify' }),
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { success: boolean; message: string };
+    expect(body.success).toBe(true);
+    expect(body.message).toContain('from step `verify`');
+    expect(mockUpdateWorkflowRun).toHaveBeenCalledWith('run-uuid-5', {
+      metadata: { resume_from_step: 'verify' },
+    });
+  });
+
+  test('dispatches resume immediately for web-dispatched cancelled runs', async () => {
+    mockGetWorkflowRun.mockResolvedValueOnce({
+      ...MOCK_CANCELLED_RUN,
+      parent_conversation_id: 'parent-conv-uuid',
+      user_message: 'Review PR',
+    });
+    mockGetConversationById.mockResolvedValueOnce({
+      id: 'parent-conv-uuid',
+      platform_conversation_id: 'web-plat-resume',
+      platform_type: 'web',
+    });
+
+    const { app } = makeApp();
+    const response = await app.request('/api/workflows/runs/run-uuid-5/resume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fromStep: 'implement' }),
+    });
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      success: boolean;
+      dispatched?: boolean;
+      message: string;
+    };
+    expect(body.success).toBe(true);
+    expect(body.dispatched).toBe(true);
+    expect(body.message).toContain('Resuming workflow');
+    expect(mockUpdateWorkflowRun).toHaveBeenCalledWith('run-uuid-5', {
+      metadata: { resume_from_step: 'implement' },
+    });
+    expect(mockHandleMessage).toHaveBeenCalled();
+    const [, platformConvId, dispatchedMessage] = mockHandleMessage.mock.calls[0] as [
+      unknown,
+      string,
+      string,
+    ];
+    expect(platformConvId).toBe('web-plat-resume');
+    expect(dispatchedMessage).toBe('/workflow run deploy Review PR');
+  });
+
+  test.each(['MERGED', 'CLOSED'] as const)(
+    'blocks pull_request workflow resume when the pull request state is %s',
+    async state => {
+      mockWorkflowDiscoveryWithInput('custom-pr-maintenance', 'pull_request');
+      mockGetWorkflowRun.mockResolvedValueOnce({
+        ...MOCK_CANCELLED_RUN,
+        workflow_name: 'custom-pr-maintenance',
+        user_message: 'https://github.com/lukesurazski/Archon/pull/4',
+        parent_conversation_id: 'parent-conv-uuid',
+      });
+      mockExecFileAsync.mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          state,
+          url: 'https://github.com/lukesurazski/Archon/pull/4',
+          headRefName: 'feat/task-container-workspace',
+        }),
+        stderr: '',
+      });
+
+      const { app } = makeApp();
+      const response = await app.request('/api/workflows/runs/run-uuid-5/resume', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fromStep: 'implement' }),
+      });
+
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toContain(`is ${state}`);
+      expect(mockUpdateWorkflowRun).not.toHaveBeenCalled();
+      expect(mockHandleMessage).not.toHaveBeenCalled();
+    }
+  );
+
+  test('allows pull_request workflow resume when the pull request is still open', async () => {
+    mockWorkflowDiscoveryWithInput('custom-pr-maintenance', 'pull_request');
+    mockGetWorkflowRun.mockResolvedValueOnce({
+      ...MOCK_CANCELLED_RUN,
+      workflow_name: 'custom-pr-maintenance',
+      user_message: 'https://github.com/lukesurazski/Archon/pull/5',
+      parent_conversation_id: 'parent-conv-uuid',
+    });
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: JSON.stringify({
+        state: 'OPEN',
+        url: 'https://github.com/lukesurazski/Archon/pull/5',
+        headRefName: 'feat/open-feedback',
+      }),
+      stderr: '',
+    });
+    mockGetConversationById.mockResolvedValueOnce({
+      id: 'parent-conv-uuid',
+      platform_conversation_id: 'web-plat-resume',
+      platform_type: 'web',
+    });
+
+    const { app } = makeApp();
+    const response = await app.request('/api/workflows/runs/run-uuid-5/resume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fromStep: 'implement' }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(mockUpdateWorkflowRun).toHaveBeenCalledWith('run-uuid-5', {
+      metadata: { resume_from_step: 'implement' },
+    });
+    expect(mockHandleMessage).toHaveBeenCalled();
   });
 });
 

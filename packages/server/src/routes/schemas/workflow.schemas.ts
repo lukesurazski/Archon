@@ -154,8 +154,14 @@ export const cancelWorkflowRunResponseSchema = z
 
 /** Generic workflow run action response (resume, abandon, delete). */
 export const workflowRunActionResponseSchema = z
-  .object({ success: z.boolean(), message: z.string() })
+  .object({ success: z.boolean(), message: z.string(), dispatched: z.boolean().optional() })
   .openapi('WorkflowRunActionResponse');
+
+/** POST /api/workflows/runs/:runId/resume request body. */
+export const resumeWorkflowRunBodySchema = z
+  .object({ fromStep: z.string().trim().min(1).optional() })
+  .optional()
+  .openapi('ResumeWorkflowRunBody');
 
 /** POST /api/workflows/runs/:runId/approve request body. */
 export const approveWorkflowRunBodySchema = z

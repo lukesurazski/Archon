@@ -2778,6 +2778,7 @@ export interface components {
     WorkflowRunActionResponse: {
       success: boolean;
       message: string;
+      dispatched?: boolean;
     };
     ApproveWorkflowRunBody: {
       comment?: string;

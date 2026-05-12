@@ -28,7 +28,7 @@ import {
   ConversationNotFoundError,
   generateAndSetTitle,
 } from '@archon/core';
-import { removeWorktree, toRepoPath, toWorktreePath } from '@archon/git';
+import { execFileAsync, removeWorktree, toRepoPath, toWorktreePath } from '@archon/git';
 import {
   createLogger,
   getWorkflowFolderSearchPaths,
@@ -87,6 +87,7 @@ import {
   workflowRunActionResponseSchema,
   dashboardRunsResponseSchema,
   runWorkflowBodySchema,
+  resumeWorkflowRunBodySchema,
   dashboardRunsQuerySchema,
   workflowRunsQuerySchema,
   approveWorkflowRunBodySchema,
@@ -731,8 +732,12 @@ const resumeWorkflowRunRoute = createRoute({
   method: 'post',
   path: '/api/workflows/runs/{runId}/resume',
   tags: ['Workflows'],
-  summary: 'Resume a failed workflow run (re-run auto-resumes from completed nodes)',
-  request: { params: z.object({ runId: z.string() }) },
+  summary:
+    'Resume a stopped, cancelled, or failed workflow run (re-run auto-resumes from checkpoints)',
+  request: {
+    params: z.object({ runId: z.string() }),
+    body: { content: { 'application/json': { schema: resumeWorkflowRunBodySchema } } },
+  },
   responses: {
     200: {
       content: { 'application/json': { schema: workflowRunActionResponseSchema } },
@@ -1152,12 +1157,121 @@ export function registerApiRoutes(
     return { accepted: true, status: result.status };
   }
 
+  class ResumePreflightError extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = 'ResumePreflightError';
+    }
+  }
+
+  function extractGitHubPullRequest(input: string): { repo?: string; number: string } | null {
+    const urlMatch = /github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/pull\/([0-9]+)/i.exec(input);
+    if (urlMatch) {
+      return { repo: urlMatch[1], number: urlMatch[2] };
+    }
+    const numberMatch = /(?:^|\D)#?([0-9]+)(?:\D|$)/.exec(input);
+    return numberMatch ? { number: numberMatch[1] } : null;
+  }
+
+  async function getGitHubRepoForRun(run: WorkflowRun, parsedRepo?: string): Promise<string> {
+    if (parsedRepo) return parsedRepo;
+    if (!run.working_path) {
+      throw new ResumePreflightError('Cannot validate PR state: workflow run has no working path.');
+    }
+
+    let remoteUrl = '';
+    try {
+      const { stdout } = await execFileAsync(
+        'git',
+        ['-C', run.working_path, 'remote', 'get-url', 'origin'],
+        { timeout: 10_000 }
+      );
+      remoteUrl = stdout.trim();
+    } catch (error) {
+      getLog().warn(
+        { err: error as Error, runId: run.id },
+        'api.workflow_resume_git_remote_failed'
+      );
+      throw new ResumePreflightError('Cannot validate PR state: failed to read git origin remote.');
+    }
+
+    const repoMatch = /(?:github\.com[:/])([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?$/.exec(
+      remoteUrl
+    );
+    if (!repoMatch) {
+      throw new ResumePreflightError(
+        `Cannot validate PR state: origin remote is not a GitHub repository (${remoteUrl}).`
+      );
+    }
+    return repoMatch[1];
+  }
+
+  async function workflowRequiresOpenPullRequest(run: WorkflowRun): Promise<boolean> {
+    if (!run.working_path) {
+      throw new ResumePreflightError('Cannot validate PR state: workflow run has no working path.');
+    }
+    try {
+      const result = await discoverWorkflowsWithConfig(run.working_path, loadConfig);
+      const workflow = result.workflows.find(
+        ws => ws.workflow.name === run.workflow_name
+      )?.workflow;
+      return workflow?.inputs?.some(input => input.type === 'pull_request') ?? false;
+    } catch (error) {
+      getLog().warn(
+        { err: error as Error, runId: run.id, workflowName: run.workflow_name },
+        'api.workflow_resume_definition_preflight_failed'
+      );
+      throw new ResumePreflightError(
+        'Cannot validate PR state: failed to inspect workflow definition.'
+      );
+    }
+  }
+
+  async function validateWorkflowResumePreflight(run: WorkflowRun): Promise<void> {
+    if (!(await workflowRequiresOpenPullRequest(run))) return;
+
+    const parsed = extractGitHubPullRequest(run.user_message ?? '');
+    if (!parsed) {
+      throw new ResumePreflightError(
+        'Cannot resume workflow: it expects a pull request input, but no pull request number was found on the run.'
+      );
+    }
+
+    const repo = await getGitHubRepoForRun(run, parsed.repo);
+    try {
+      const { stdout } = await execFileAsync(
+        'gh',
+        ['pr', 'view', parsed.number, '--repo', repo, '--json', 'state,url,headRefName'],
+        { cwd: run.working_path ?? undefined, timeout: 15_000, maxBuffer: 1024 * 1024 }
+      );
+      const pr = JSON.parse(stdout.trim()) as {
+        state?: string;
+        url?: string;
+        headRefName?: string;
+      };
+      if (pr.state !== 'OPEN') {
+        const prLabel = pr.url ?? `${repo}#${parsed.number}`;
+        throw new ResumePreflightError(
+          `Cannot resume workflow: ${prLabel} is ${pr.state ?? 'not open'}.`
+        );
+      }
+    } catch (error) {
+      if (error instanceof ResumePreflightError) throw error;
+      getLog().warn(
+        { err: error as Error, runId: run.id, workflowName: run.workflow_name, repo },
+        'api.workflow_resume_pr_preflight_failed'
+      );
+      throw new ResumePreflightError(
+        'Cannot resume workflow: failed to validate that the pull request is still open.'
+      );
+    }
+  }
+
   /**
-   * Re-enter the orchestrator after a paused approval gate is resolved, so a
-   * web-dispatched workflow continues (approve) or runs its on_reject prompt
-   * (reject) without the user having to re-run the workflow command. The CLI's
-   * `workflowApproveCommand` / `workflowRejectCommand` already auto-resume via
-   * `workflowRunCommand({ resume: true })`; this is the web-side equivalent.
+   * Re-enter the orchestrator after a resumable run is prepared, so a
+   * web-dispatched workflow continues without the user having to re-run the
+   * workflow command. The CLI's workflow commands still use the manual re-run
+   * flow; this is the web-side equivalent for dashboard actions.
    *
    * Returns `true` when a resume dispatch was initiated, `false` otherwise (no
    * parent conversation on the run, parent conversation deleted, parent was on
@@ -1172,9 +1286,9 @@ export function registerApiRoutes(
    * the resumed output. Non-web parents skip auto-resume and the originating
    * platform's own re-run flow applies.
    */
-  async function tryAutoResumeAfterGate(
+  async function tryAutoResumeRun(
     run: WorkflowRun,
-    action: 'approve' | 'reject'
+    action: 'approve' | 'reject' | 'resume'
   ): Promise<boolean> {
     if (!run.parent_conversation_id) return false;
     // Literal event names per action — greppable for ops tooling. Keeping the
@@ -1189,13 +1303,23 @@ export function registerApiRoutes(
             skippedNonWebParent: 'api.workflow_approve_auto_resume_skipped_non_web_parent' as const,
             failed: 'api.workflow_approve_auto_resume_failed' as const,
           }
-        : {
-            dispatched: 'api.workflow_reject_auto_resume_dispatched' as const,
-            skippedNoPlatformConv:
-              'api.workflow_reject_auto_resume_skipped_no_platform_conv' as const,
-            skippedNonWebParent: 'api.workflow_reject_auto_resume_skipped_non_web_parent' as const,
-            failed: 'api.workflow_reject_auto_resume_failed' as const,
-          };
+        : action === 'reject'
+          ? {
+              dispatched: 'api.workflow_reject_auto_resume_dispatched' as const,
+              skippedNoPlatformConv:
+                'api.workflow_reject_auto_resume_skipped_no_platform_conv' as const,
+              skippedNonWebParent:
+                'api.workflow_reject_auto_resume_skipped_non_web_parent' as const,
+              failed: 'api.workflow_reject_auto_resume_failed' as const,
+            }
+          : {
+              dispatched: 'api.workflow_resume_auto_resume_dispatched' as const,
+              skippedNoPlatformConv:
+                'api.workflow_resume_auto_resume_skipped_no_platform_conv' as const,
+              skippedNonWebParent:
+                'api.workflow_resume_auto_resume_skipped_non_web_parent' as const,
+              failed: 'api.workflow_resume_auto_resume_failed' as const,
+            };
     try {
       const parentConv = await conversationDb.getConversationById(run.parent_conversation_id);
       const platformConvId = parentConv?.platform_conversation_id;
@@ -2121,6 +2245,10 @@ export function registerApiRoutes(
   registerOpenApiRoute(resumeWorkflowRunRoute, async c => {
     const runId = c.req.param('runId') ?? '';
     try {
+      const body = (await c.req.json().catch(() => undefined)) as z.infer<
+        typeof resumeWorkflowRunBodySchema
+      >;
+      const fromStep = body?.fromStep?.trim();
       const run = await workflowDb.getWorkflowRun(runId);
       if (!run) {
         return apiError(c, 404, 'Workflow run not found');
@@ -2128,11 +2256,26 @@ export function registerApiRoutes(
       if (!RESUMABLE_WORKFLOW_STATUSES.includes(run.status)) {
         return apiError(c, 400, `Cannot resume workflow in '${run.status}' status`);
       }
-      // Run is already failed — the next invocation on the same path auto-resumes
+      try {
+        await validateWorkflowResumePreflight(run);
+      } catch (error) {
+        if (error instanceof ResumePreflightError) {
+          return apiError(c, 400, error.message);
+        }
+        throw error;
+      }
+      await workflowDb.updateWorkflowRun(runId, {
+        metadata: { resume_from_step: fromStep && fromStep.length > 0 ? fromStep : null },
+      });
+      const autoResumed = await tryAutoResumeRun(run, 'resume');
       const pathInfo = run.working_path ? ` at \`${run.working_path}\`` : '';
+      const stepInfo = fromStep ? ` from step \`${fromStep}\`` : '';
       return c.json({
         success: true,
-        message: `Workflow run ready to resume: ${run.workflow_name}${pathInfo}. Re-run the workflow to auto-resume from completed nodes.`,
+        dispatched: autoResumed,
+        message: autoResumed
+          ? `Workflow resume requested${stepInfo}: ${run.workflow_name}${pathInfo}. Resuming workflow.`
+          : `Workflow run ready to resume${stepInfo}: ${run.workflow_name}${pathInfo}. Re-run the workflow to auto-resume from checkpoints.`,
       });
     } catch (error) {
       getLog().error({ err: error, runId }, 'api.workflow_run_resume_failed');
@@ -2211,7 +2354,7 @@ export function registerApiRoutes(
       // `parent_conversation_id` on the run (set by orchestrator-agent for any
       // web-dispatched workflow — foreground, interactive, and background via
       // the pre-created run) and a web-platform parent (guarded in the helper).
-      const autoResumed = await tryAutoResumeAfterGate(run, 'approve');
+      const autoResumed = await tryAutoResumeRun(run, 'approve');
 
       return c.json({
         success: true,
@@ -2266,7 +2409,7 @@ export function registerApiRoutes(
         // without requiring the user to re-run the workflow command. Mirrors
         // what `workflowRejectCommand` does in the CLI. Same cross-adapter
         // guard as approve — only web parents auto-resume.
-        const autoResumed = await tryAutoResumeAfterGate(run, 'reject');
+        const autoResumed = await tryAutoResumeRun(run, 'reject');
 
         return c.json({
           success: true,

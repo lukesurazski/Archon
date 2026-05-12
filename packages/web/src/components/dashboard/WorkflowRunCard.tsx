@@ -344,7 +344,7 @@ export function WorkflowRunCard({
               }}
             />
           )}
-          {run.status === 'failed' && onResume && (
+          {(run.status === 'failed' || run.status === 'cancelled') && onResume && (
             <button
               onClick={(): void => {
                 onResume(run.id);
