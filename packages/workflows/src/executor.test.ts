@@ -601,6 +601,30 @@ describe('executeWorkflow', () => {
       expect(result.workflowRunId).toBe('run-123');
     });
 
+    it('scopes web parent auto-resume lookup to the parent conversation', async () => {
+      const findResumableRun = mock(async () => null);
+      const store = makeStore({ findResumableRun });
+      const deps = makeDeps(store);
+
+      await executeWorkflow(
+        deps,
+        makePlatform(),
+        'worker-platform-1',
+        '/tmp',
+        makeWorkflow(),
+        'test message',
+        'worker-db-1',
+        undefined,
+        undefined,
+        undefined,
+        'parent-db-1'
+      );
+
+      expect(findResumableRun).toHaveBeenCalledWith('test-workflow', '/tmp', {
+        parentConversationId: 'parent-db-1',
+      });
+    });
+
     it('starts fresh run when findResumableRun throws', async () => {
       const store = makeStore({
         findResumableRun: mock(async () => {

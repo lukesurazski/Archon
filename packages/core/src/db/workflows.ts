@@ -308,9 +308,16 @@ export async function getRunningWorkflows(): Promise<
 
 export async function findResumableRun(
   workflowName: string,
-  workingPath: string
+  workingPath: string,
+  options?: { parentConversationId?: string }
 ): Promise<WorkflowRun | null> {
   const dialect = getDialect();
+  const values: unknown[] = [workflowName, workingPath, 1];
+  let parentConversationClause = '';
+  if (options?.parentConversationId) {
+    values.push(options.parentConversationId);
+    parentConversationClause = `AND parent_conversation_id = $${String(values.length)}`;
+  }
   try {
     const result = await pool.query<WorkflowRun>(
       `SELECT * FROM remote_agent_workflow_runs
@@ -320,9 +327,10 @@ export async function findResumableRun(
            status IN ('failed', 'cancelled', 'paused')
            OR (status = 'running' AND (last_activity_at IS NULL OR last_activity_at < ${dialect.nowMinusDays(3)}))
          )
+         ${parentConversationClause}
        ORDER BY started_at DESC
        LIMIT 1`,
-      [workflowName, workingPath, 1]
+      values
     );
     const row = result.rows[0];
     return row ? normalizeWorkflowRun(row) : null;
@@ -350,7 +358,7 @@ export async function findResumableRunByParentConversation(
       `SELECT * FROM remote_agent_workflow_runs
        WHERE workflow_name = $1
          AND parent_conversation_id = $2
-         AND status IN ('failed', 'paused')
+         AND status IN ('failed', 'cancelled', 'paused')
        ORDER BY started_at DESC
        LIMIT 1`,
       [workflowName, parentConversationId]

@@ -512,6 +512,26 @@ describe('workflows database', () => {
       expect(params).toEqual(['feature-development', '/repo/path', 1]);
     });
 
+    test('scopes resumable lookup to parent conversation when provided', async () => {
+      const cancelledRun = {
+        ...mockWorkflowRun,
+        status: 'cancelled' as const,
+        working_path: '/repo/path',
+        parent_conversation_id: 'parent-conv-1',
+      };
+      mockQuery.mockResolvedValueOnce(createQueryResult([cancelledRun]));
+
+      const result = await findResumableRun('feature-development', '/repo/path', {
+        parentConversationId: 'parent-conv-1',
+      });
+
+      expect(result).toEqual(cancelledRun);
+      const [query, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+      expect(query).toContain('parent_conversation_id = $4');
+      expect(query).toContain("status IN ('failed', 'cancelled', 'paused')");
+      expect(params).toEqual(['feature-development', '/repo/path', 1, 'parent-conv-1']);
+    });
+
     test('returns a running run with null last_activity_at (never recorded activity)', async () => {
       const staleRun = {
         ...mockWorkflowRun,

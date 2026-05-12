@@ -354,7 +354,11 @@ export async function executeWorkflow(
     // Step 1: Find prior failed run — non-critical, fall through on DB error
     let resumableRun: Awaited<ReturnType<typeof deps.store.findResumableRun>> = null;
     try {
-      resumableRun = await deps.store.findResumableRun(workflow.name, cwd);
+      resumableRun = await deps.store.findResumableRun(
+        workflow.name,
+        cwd,
+        parentConversationId ? { parentConversationId } : undefined
+      );
     } catch (error) {
       const err = error as Error;
       getLog().error(
