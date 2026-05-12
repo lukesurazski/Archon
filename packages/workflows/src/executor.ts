@@ -334,6 +334,11 @@ export async function executeWorkflow(
     const targetLayerIndex = layers.findIndex(layer =>
       layer.some(node => node.id === resumeFromStep)
     );
+    if (targetLayerIndex === -1) {
+      throw new Error(
+        `Workflow '${workflow.name}' cannot map step '${resumeFromStep}' to a DAG layer`
+      );
+    }
     const checkpointNodeIds = layers
       .slice(0, targetLayerIndex)
       .flatMap(layer => layer.map(node => node.id));

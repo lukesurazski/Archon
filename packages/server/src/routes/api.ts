@@ -1207,7 +1207,9 @@ export function registerApiRoutes(
   }
 
   async function workflowRequiresOpenPullRequest(run: WorkflowRun): Promise<boolean> {
-    if (!run.working_path) return false;
+    if (!run.working_path) {
+      throw new ResumePreflightError('Cannot validate PR state: workflow run has no working path.');
+    }
     try {
       const result = await discoverWorkflowsWithConfig(run.working_path, loadConfig);
       const workflow = result.workflows.find(
@@ -1219,7 +1221,9 @@ export function registerApiRoutes(
         { err: error as Error, runId: run.id, workflowName: run.workflow_name },
         'api.workflow_resume_definition_preflight_failed'
       );
-      return false;
+      throw new ResumePreflightError(
+        'Cannot validate PR state: failed to inspect workflow definition.'
+      );
     }
   }
 
@@ -2241,7 +2245,9 @@ export function registerApiRoutes(
   registerOpenApiRoute(resumeWorkflowRunRoute, async c => {
     const runId = c.req.param('runId') ?? '';
     try {
-      const body = (await c.req.json().catch(() => undefined)) as { fromStep?: string } | undefined;
+      const body = (await c.req.json().catch(() => undefined)) as z.infer<
+        typeof resumeWorkflowRunBodySchema
+      >;
       const fromStep = body?.fromStep?.trim();
       const run = await workflowDb.getWorkflowRun(runId);
       if (!run) {

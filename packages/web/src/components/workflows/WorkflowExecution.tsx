@@ -389,10 +389,15 @@ export function WorkflowExecution({ runId }: WorkflowExecutionProps): React.Reac
     };
     if (
       resumeActionState.status === 'dispatched' &&
-      isTerminal(merged.status) &&
-      liveWorkflow.status === initialData.status
+      isTerminal(liveWorkflow.status) &&
+      !isTerminal(initialData.status)
     ) {
-      return { ...merged, status: 'pending' as const, completedAt: undefined };
+      return {
+        ...merged,
+        status: initialData.status,
+        completedAt: undefined,
+        error: undefined,
+      };
     }
     return merged;
   })();

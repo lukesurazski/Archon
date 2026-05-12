@@ -1,9 +1,10 @@
-import { describe, test, expect, mock, beforeEach } from 'bun:test';
+import { describe, test, expect, mock, spyOn, beforeEach, afterAll } from 'bun:test';
 import { OpenAPIHono } from '@hono/zod-openapi';
 import type { ConversationLockManager } from '@archon/core';
 import type { WebAdapter } from '../adapters/web';
 import { validationErrorHook } from './openapi-defaults';
 import { mockAllWorkflowModules } from '../test/workflow-mock-factories';
+import * as workflowDiscoveryModule from '@archon/workflows/workflow-discovery';
 
 // ---------------------------------------------------------------------------
 // Mock setup — must be before dynamic imports of mocked modules
@@ -130,11 +131,18 @@ mock.module('@archon/paths', () => ({
 
 mockAllWorkflowModules();
 
-const mockDiscoverWorkflowsWithConfig = mock(async () => ({ workflows: [], errors: [] }));
+// Spy on the (factory-mocked) workflow-discovery module rather than calling
+// `mock.module()` again locally. `mock.module()` is process-global and
+// irreversible, while `spyOn().mockRestore()` is properly scoped. Other test
+// files already mock this path with their own implementations via the factory.
+const mockDiscoverWorkflowsWithConfig = spyOn(
+  workflowDiscoveryModule,
+  'discoverWorkflowsWithConfig'
+).mockImplementation(async () => ({ workflows: [], errors: [] }));
 
-mock.module('@archon/workflows/workflow-discovery', () => ({
-  discoverWorkflowsWithConfig: mockDiscoverWorkflowsWithConfig,
-}));
+afterAll(() => {
+  mockDiscoverWorkflowsWithConfig.mockRestore();
+});
 
 const mockExecFileAsync = mock(async (_cmd: string, _args: string[]) => ({
   stdout: '',
@@ -1176,6 +1184,9 @@ describe('POST /api/workflows/runs/:runId/resume', () => {
     expect(body.success).toBe(true);
     expect(body.dispatched).toBe(true);
     expect(body.message).toContain('Resuming workflow');
+    expect(mockUpdateWorkflowRun).toHaveBeenCalledWith('run-uuid-5', {
+      metadata: { resume_from_step: 'implement' },
+    });
     expect(mockHandleMessage).toHaveBeenCalled();
     const [, platformConvId, dispatchedMessage] = mockHandleMessage.mock.calls[0] as [
       unknown,
@@ -1186,36 +1197,39 @@ describe('POST /api/workflows/runs/:runId/resume', () => {
     expect(dispatchedMessage).toBe('/workflow run deploy Review PR');
   });
 
-  test('blocks pull_request workflow resume when the pull request is already merged', async () => {
-    mockWorkflowDiscoveryWithInput('custom-pr-maintenance', 'pull_request');
-    mockGetWorkflowRun.mockResolvedValueOnce({
-      ...MOCK_CANCELLED_RUN,
-      workflow_name: 'custom-pr-maintenance',
-      user_message: 'https://github.com/lukesurazski/Archon/pull/4',
-      parent_conversation_id: 'parent-conv-uuid',
-    });
-    mockExecFileAsync.mockResolvedValueOnce({
-      stdout: JSON.stringify({
-        state: 'MERGED',
-        url: 'https://github.com/lukesurazski/Archon/pull/4',
-        headRefName: 'feat/task-container-workspace',
-      }),
-      stderr: '',
-    });
+  test.each(['MERGED', 'CLOSED'] as const)(
+    'blocks pull_request workflow resume when the pull request state is %s',
+    async state => {
+      mockWorkflowDiscoveryWithInput('custom-pr-maintenance', 'pull_request');
+      mockGetWorkflowRun.mockResolvedValueOnce({
+        ...MOCK_CANCELLED_RUN,
+        workflow_name: 'custom-pr-maintenance',
+        user_message: 'https://github.com/lukesurazski/Archon/pull/4',
+        parent_conversation_id: 'parent-conv-uuid',
+      });
+      mockExecFileAsync.mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          state,
+          url: 'https://github.com/lukesurazski/Archon/pull/4',
+          headRefName: 'feat/task-container-workspace',
+        }),
+        stderr: '',
+      });
 
-    const { app } = makeApp();
-    const response = await app.request('/api/workflows/runs/run-uuid-5/resume', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fromStep: 'implement' }),
-    });
+      const { app } = makeApp();
+      const response = await app.request('/api/workflows/runs/run-uuid-5/resume', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fromStep: 'implement' }),
+      });
 
-    expect(response.status).toBe(400);
-    const body = (await response.json()) as { error: string };
-    expect(body.error).toContain('is MERGED');
-    expect(mockUpdateWorkflowRun).not.toHaveBeenCalled();
-    expect(mockHandleMessage).not.toHaveBeenCalled();
-  });
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toContain(`is ${state}`);
+      expect(mockUpdateWorkflowRun).not.toHaveBeenCalled();
+      expect(mockHandleMessage).not.toHaveBeenCalled();
+    }
+  );
 
   test('allows pull_request workflow resume when the pull request is still open', async () => {
     mockWorkflowDiscoveryWithInput('custom-pr-maintenance', 'pull_request');
