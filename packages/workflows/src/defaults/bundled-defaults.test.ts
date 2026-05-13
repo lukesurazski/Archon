@@ -83,6 +83,29 @@ describe('bundled-defaults', () => {
       const content = BUNDLED_COMMANDS['archon-create-pr'];
       expect(content).toContain('echo "$PR_NUMBER" > "$ARTIFACTS_DIR/.pr-number"');
     });
+
+    it('PR review agents use cached PR context from the scope step', () => {
+      const scope = BUNDLED_COMMANDS['archon-pr-review-scope'];
+      expect(scope).toContain('$ARTIFACTS_DIR/review/pr-meta.json');
+      expect(scope).toContain('$ARTIFACTS_DIR/review/pr.diff');
+      expect(scope).toContain('$ARTIFACTS_DIR/review/files.txt');
+      expect(scope).toContain('$ARTIFACTS_DIR/review/files.json');
+
+      const reviewAgents = [
+        'archon-code-review-agent',
+        'archon-error-handling-agent',
+        'archon-test-coverage-agent',
+        'archon-comment-quality-agent',
+        'archon-docs-impact-agent',
+      ];
+      for (const name of reviewAgents) {
+        const content = BUNDLED_COMMANDS[name];
+        expect(content).toContain('cat $ARTIFACTS_DIR/review/pr-meta.json');
+        expect(content).toContain('cat $ARTIFACTS_DIR/review/files.txt');
+        expect(content).toContain('cat $ARTIFACTS_DIR/review/pr.diff');
+        expect(content).not.toContain('\ngh pr diff {number}');
+      }
+    });
   });
 
   describe('BUNDLED_WORKFLOWS', () => {

@@ -31,11 +31,18 @@ cat $ARTIFACTS_DIR/review/scope.md
 
 **CRITICAL**: Check for "NOT Building (Scope Limits)" section. Items listed there are **intentionally excluded** - do NOT flag them as missing documentation needs!
 
-### 1.3 Get PR Diff
+### 1.3 Read Cached PR Metadata and Diff
 
 ```bash
-gh pr diff {number}
+cat $ARTIFACTS_DIR/review/pr-meta.json
+cat $ARTIFACTS_DIR/review/files.txt
+cat $ARTIFACTS_DIR/review/pr.diff
 ```
+
+Do NOT run `gh pr diff` or `gh pr view` here. The scope step already cached
+the PR metadata, changed-file list, and full diff for all parallel review
+agents. If a cached artifact is missing or empty, fail clearly instead of
+re-fetching so the workflow exposes the broken scope step.
 
 ### 1.4 Read Current Documentation
 
