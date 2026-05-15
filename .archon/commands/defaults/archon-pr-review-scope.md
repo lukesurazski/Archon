@@ -44,12 +44,15 @@ fi
 
 # Write to registry for downstream steps (if not already there)
 echo "$PR_NUMBER" > $ARTIFACTS_DIR/.pr-number
+mkdir -p "$ARTIFACTS_DIR/review"
 ```
 
 ### 1.2 Fetch PR Details
 
 ```bash
-gh pr view {number} --json number,title,body,url,headRefName,baseRefName,files,additions,deletions,changedFiles,state,author,isDraft,mergeable,mergeStateStatus
+gh pr view {number} --json number,title,body,url,headRefName,baseRefName,files,additions,deletions,changedFiles,state,author,isDraft,mergeable,mergeStateStatus \
+  > "$ARTIFACTS_DIR/review/pr-meta.json"
+cat "$ARTIFACTS_DIR/review/pr-meta.json"
 ```
 
 **Extract:**
@@ -200,15 +203,19 @@ Large PRs are harder to review thoroughly. Consider splitting into smaller PRs f
 ### 3.1 Get Full Diff
 
 ```bash
-gh pr diff {number}
+gh pr diff {number} > "$ARTIFACTS_DIR/review/pr.diff"
+wc -l "$ARTIFACTS_DIR/review/pr.diff"
 ```
 
-Store this for reference - parallel agents will re-fetch as needed.
+Store this for reference. Parallel review agents MUST read
+`$ARTIFACTS_DIR/review/pr.diff` instead of re-fetching the diff.
 
 ### 3.2 List Changed Files by Type
 
 ```bash
-gh pr view {number} --json files --jq '.files[].path'
+jq -r '.files[].path' "$ARTIFACTS_DIR/review/pr-meta.json" > "$ARTIFACTS_DIR/review/files.txt"
+jq '.files' "$ARTIFACTS_DIR/review/pr-meta.json" > "$ARTIFACTS_DIR/review/files.json"
+cat "$ARTIFACTS_DIR/review/files.txt"
 ```
 
 **Categorize files:**
@@ -238,7 +245,7 @@ For each new abstraction found, note it in the scope manifest under "Review Focu
 
 ```bash
 # Quick scan for new abstractions in diff
-gh pr diff {number} | grep "^+" | sed 's/^+//' | grep -E "(^interface |^export interface |^type |^abstract class |^export class )" | head -20
+grep "^+" "$ARTIFACTS_DIR/review/pr.diff" | sed 's/^+//' | grep -E "(^interface |^export interface |^type |^abstract class |^export class )" | head -20
 ```
 
 **PHASE_3_CHECKPOINT:**
@@ -310,6 +317,17 @@ sed -n '/## Deviations/,/^## /p' $ARTIFACTS_DIR/../runs/*/implementation.md | he
 
 ```bash
 mkdir -p $ARTIFACTS_DIR/review
+for f in \
+  "$ARTIFACTS_DIR/review/pr-meta.json" \
+  "$ARTIFACTS_DIR/review/pr.diff" \
+  "$ARTIFACTS_DIR/review/files.txt" \
+  "$ARTIFACTS_DIR/review/files.json"
+do
+  if [ ! -s "$f" ]; then
+    echo "ERROR: Missing or empty cached review artifact: $f" >&2
+    exit 1
+  fi
+done
 ```
 
 ### 4.2 Clean Stale Artifacts
@@ -505,5 +523,6 @@ Launching 5 parallel review agents...
 - **PR_IDENTIFIED**: Valid open PR found
 - **NO_CONFLICTS**: Merge conflicts block workflow
 - **CONTEXT_GATHERED**: Diff and file list available
+- **CACHE_WRITTEN**: `pr-meta.json`, `pr.diff`, `files.txt`, and `files.json` written under `$ARTIFACTS_DIR/review/`
 - **ARTIFACTS_DIR_CREATED**: Directory structure exists
 - **SCOPE_MANIFEST_WRITTEN**: `scope.md` file created with pre-review status
