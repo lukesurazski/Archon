@@ -100,10 +100,11 @@ describe('bundled-defaults', () => {
       ];
       for (const name of reviewAgents) {
         const content = BUNDLED_COMMANDS[name];
-        expect(content).toContain('cat $ARTIFACTS_DIR/review/pr-meta.json');
-        expect(content).toContain('cat $ARTIFACTS_DIR/review/files.txt');
-        expect(content).toContain('cat $ARTIFACTS_DIR/review/pr.diff');
-        expect(content).not.toContain('\ngh pr diff {number}');
+        expect(content).toMatch(/cat\s+"?\$ARTIFACTS_DIR\/review\/pr-meta\.json"?/);
+        expect(content).toMatch(/cat\s+"?\$ARTIFACTS_DIR\/review\/files\.txt"?/);
+        expect(content).toMatch(/cat\s+"?\$ARTIFACTS_DIR\/review\/pr\.diff"?/);
+        expect(content).not.toMatch(/\bgh\s+pr\s+diff\s+\{number\}\b/);
+        expect(content).not.toMatch(/\bgh\s+pr\s+view\s+\{number\}\b/);
       }
     });
   });

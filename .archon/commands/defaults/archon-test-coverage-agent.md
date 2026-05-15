@@ -36,9 +36,20 @@ Note which files are source vs test files.
 ### 1.3 Read Cached PR Metadata and Diff
 
 ```bash
-cat $ARTIFACTS_DIR/review/pr-meta.json
-cat $ARTIFACTS_DIR/review/files.txt
-cat $ARTIFACTS_DIR/review/pr.diff
+for f in \
+  "$ARTIFACTS_DIR/review/pr-meta.json" \
+  "$ARTIFACTS_DIR/review/files.txt" \
+  "$ARTIFACTS_DIR/review/pr.diff"
+do
+  if [ ! -s "$f" ]; then
+    echo "ERROR: Required cached artifact missing or empty: $f" >&2
+    exit 1
+  fi
+done
+
+cat "$ARTIFACTS_DIR/review/pr-meta.json"
+cat "$ARTIFACTS_DIR/review/files.txt"
+cat "$ARTIFACTS_DIR/review/pr.diff"
 ```
 
 Do NOT run `gh pr diff` or `gh pr view` here. The scope step already cached

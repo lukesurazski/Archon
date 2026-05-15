@@ -317,10 +317,17 @@ sed -n '/## Deviations/,/^## /p' $ARTIFACTS_DIR/../runs/*/implementation.md | he
 
 ```bash
 mkdir -p $ARTIFACTS_DIR/review
-test -s "$ARTIFACTS_DIR/review/pr-meta.json"
-test -s "$ARTIFACTS_DIR/review/pr.diff"
-test -s "$ARTIFACTS_DIR/review/files.txt"
-test -s "$ARTIFACTS_DIR/review/files.json"
+for f in \
+  "$ARTIFACTS_DIR/review/pr-meta.json" \
+  "$ARTIFACTS_DIR/review/pr.diff" \
+  "$ARTIFACTS_DIR/review/files.txt" \
+  "$ARTIFACTS_DIR/review/files.json"
+do
+  if [ ! -s "$f" ]; then
+    echo "ERROR: Missing or empty cached review artifact: $f" >&2
+    exit 1
+  fi
+done
 ```
 
 ### 4.2 Clean Stale Artifacts
